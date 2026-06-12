@@ -16,6 +16,7 @@ from reccmp.ghidra.importer.pdb_extraction import (
     CppStackSymbol,
     FunctionSignature,
 )
+from reccmp.ghidra.importer.calling_conventions import BORLAND_REGISTER_CALL_TYPE
 from .ghidra_integration_test_setup import (
     GhidraFunctionTestHelper,
     GhidraTypeTestHelper,
@@ -176,6 +177,66 @@ void __fastcall MyTestFn(int p_src,int p_dest)
 }
 
 """)
+
+
+def test_import_borland_register_convention(
+    ghidra: "FlatProgramAPI",
+    function_helper: GhidraFunctionTestHelper,
+    type_helper: GhidraTypeTestHelper,
+):
+    from reccmp.ghidra.importer.function_importer import (
+        PdbFunctionImporter,
+        PdbFunction,
+    )
+
+    function_helper.overwrite_example_function(b"\xc3")
+
+    func_signature = FunctionSignature(
+        call_type=BORLAND_REGISTER_CALL_TYPE,
+        arglist=[
+            CVInfoTypeEnum.T_INT4,
+            CVInfoTypeEnum.T_INT4,
+            CVInfoTypeEnum.T_INT4,
+            CVInfoTypeEnum.T_INT4,
+        ],
+        return_type=CVInfoTypeEnum.T_VOID,
+        class_type=None,
+        symbols=[
+            CppRegisterSymbol("p_first", CVInfoTypeEnum.T_INT4, "eax"),
+            CppRegisterSymbol("p_second", CVInfoTypeEnum.T_INT4, "edx"),
+            CppRegisterSymbol("p_third", CVInfoTypeEnum.T_INT4, "ecx"),
+            CppStackSymbol("p_fourth", CVInfoTypeEnum.T_INT4, 4),
+        ],
+        this_adjust=0,
+    )
+    pdb_function = PdbFunction(
+        ReccmpMatch(function_helper.orig_address, 1234, {"name": "MyTestFn"}),
+        func_signature,
+        is_stub=False,
+    )
+    importer = PdbFunctionImporter.build(
+        ghidra, pdb_function, type_helper.type_importer, []
+    )
+    importer.overwrite_ghidra_function(function_helper.ghidra_function)
+
+    assert function_helper.ghidra_function.getCallingConventionName() == (
+        BORLAND_REGISTER_CALL_TYPE
+    )
+    assert importer.matches_ghidra_function(function_helper.ghidra_function) is True
+
+    params = list(function_helper.ghidra_function.getParameters())
+    assert [param.getName() for param in params] == [
+        "p_first",
+        "p_second",
+        "p_third",
+        "p_fourth",
+    ]
+    assert [param.getRegister().getName() for param in params[:3]] == [
+        "EAX",
+        "EDX",
+        "ECX",
+    ]
+    assert params[3].getStackOffset() == 4
 
 
 def test_record_array_access(

@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
+from reccmp.delphi import has_embedded_td32
+
 from .config import (
     BuildFile,
     BuildFileTarget,
@@ -478,13 +480,13 @@ def argparse_add_project_target_args(parser: argparse.ArgumentParser):
         metavar=(
             "<original-binary>",
             "<recompiled-binary>",
-            "<recompiled-pdb>",
+            "<recompiled-symbols>",
             "<source-root>",
         ),
         nargs=4,
         action=RecCmpPathsAction,
         dest="paths_target",
-        help="The original binary, the recompiled binary, the PDB of the recompiled binary, and the source root",
+        help="The original binary, recompiled binary, symbol file, and source root",
     )
 
 
@@ -514,7 +516,7 @@ def argparse_parse_project_target(
 
     if not target.recompiled_pdb.is_file():
         raise RecCmpProjectException(
-            f"Symbols PDB {target.recompiled_pdb} does not exist"
+            f"Symbols file {target.recompiled_pdb} does not exist"
         )
 
     for source_path in target.source_paths:
@@ -596,21 +598,31 @@ def detect_project(
         build_config_path = build_directory / RECCMP_BUILD_CONFIG
         build_data = BuildFile(project=project_directory.resolve(), targets={})
 
+        def detect_symbol_file(binary: Path) -> Path | None:
+            for suffix in (".pdb", ".map"):
+                symbols = binary.with_suffix(suffix)
+                if symbols.is_file():
+                    return symbols
+
+            if has_embedded_td32(binary):
+                return binary
+
+            return None
+
         def detect_recompiled(filename: str):
             for binary in search_path_append_file(search_path, filename):
-                pdb = binary.with_suffix(".pdb")
                 if binary.is_file():
-                    if pdb.is_file():
+                    symbols = detect_symbol_file(binary)
+                    if symbols is not None:
                         build_data.targets.setdefault(
-                            target_id, BuildFileTarget(path=binary, pdb=pdb)
+                            target_id, BuildFileTarget(path=binary, pdb=symbols)
                         )
                         logger.info("Found %s -> %s", target_id, binary)
-                        logger.info("Found %s -> %s", target_id, pdb)
+                        logger.info("Found %s -> %s", target_id, symbols)
                         return
 
                     logger.warning(
-                        "Missing PDB file '%s' next to binary '%s'",
-                        pdb.name,
+                        "Missing symbols for binary '%s' (tried .pdb, .map, embedded TD32)",
                         str(binary),
                     )
 

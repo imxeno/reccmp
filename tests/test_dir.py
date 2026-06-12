@@ -34,10 +34,17 @@ def test_walk_dir_with_mixed_files(tmp_path_factory):
     create_blank_file(path / "sample.jpg")
     create_blank_file(path / "game.cpp")
     create_blank_file(path / "game.hpp")
+    create_blank_file(path / "Unit1.pas")
+    create_blank_file(path / "Project1.dpr")
 
     files = list(walk_source_dir(path))
-    assert len(files) == 2
-    assert {f.name for f in files} == {"game.cpp", "game.hpp"}
+    assert len(files) == 4
+    assert {f.name for f in files} == {
+        "game.cpp",
+        "game.hpp",
+        "Unit1.pas",
+        "Project1.dpr",
+    }
 
 
 def test_walk_non_directory(tmp_path_factory):
@@ -124,9 +131,10 @@ def test_search_mixed_files(tmp_path_factory):
     create_blank_file(path / "sample.jpg")
     create_blank_file(path / "game.cpp")
     create_blank_file(path / "game.hpp")
+    create_blank_file(path / "Unit1.pas")
 
     files = list(source_code_search(path))
-    assert {f.name for f in files} == {"game.cpp", "game.hpp"}
+    assert {f.name for f in files} == {"game.cpp", "game.hpp", "Unit1.pas"}
 
 
 def test_search_ignore_missing_dir(tmp_path_factory):

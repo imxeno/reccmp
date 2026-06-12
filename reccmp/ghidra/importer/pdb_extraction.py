@@ -8,6 +8,12 @@ from reccmp.compare.db import ReccmpMatch
 from reccmp.cvdump.types import CvdumpParsedType
 from reccmp.cvdump.cvinfo import CvdumpTypeKey, CVInfoTypeEnum
 
+from .calling_conventions import (
+    BORLAND_REGISTER_CALL_TYPE,
+    map_debug_call_type_to_ghidra,
+    registers_match,
+)
+
 logger = logging.getLogger(__file__)
 
 
@@ -56,13 +62,6 @@ class PdbFunctionExtractor:
     def __init__(self, compare: Compare):
         self.compare = compare
 
-    _call_type_map = {
-        "ThisCall": "__thiscall",
-        "C Near": "default",
-        "STD Near": "__stdcall",
-        "Fast Near": "__fastcall",
-    }
-
     def _get_cvdump_type(
         self, type_key: CvdumpTypeKey | None
     ) -> CvdumpParsedType | None:
@@ -87,7 +86,7 @@ class PdbFunctionExtractor:
 
         arg_list_type = self._get_cvdump_type(function_type.get("arg_list_type"))
         assert arg_list_type is not None
-        arg_list_pdb_types = arg_list_type.get("args", [])
+        arg_list_pdb_types = list(arg_list_type.get("args", []))
         assert arg_list_type["argcount"] == len(arg_list_pdb_types)
 
         symbols: list[CppStackOrRegisterSymbol] = []
@@ -102,7 +101,7 @@ class PdbFunctionExtractor:
                     CppRegisterSymbol(
                         symbol.name,
                         symbol.data_type,
-                        symbol.location,
+                        symbol.location.lower(),
                     )
                 )
             elif symbol.symbol_type == "S_BPREL32":
@@ -115,7 +114,10 @@ class PdbFunctionExtractor:
                     )
                 )
 
-        call_type = self._call_type_map[function_type["call_type"]]
+        call_type = map_debug_call_type_to_ghidra(function_type["call_type"])
+        if call_type == BORLAND_REGISTER_CALL_TYPE:
+            self._add_borland_register_self(function_type, arg_list_pdb_types, symbols)
+
         this_adjust = function_type.get("this_adjust", 0)
 
         return FunctionSignature(
@@ -126,6 +128,31 @@ class PdbFunctionExtractor:
             symbols=symbols,
             this_adjust=this_adjust,
         )
+
+    def _add_borland_register_self(
+        self,
+        function_type: CvdumpParsedType,
+        arg_list_pdb_types: list[CvdumpTypeKey],
+        symbols: list[CppStackOrRegisterSymbol],
+    ):
+        if function_type["type"] != "LF_MFUNCTION":
+            return
+
+        this_type = function_type.get("this_type")
+        if this_type is None or this_type == CVInfoTypeEnum.T_NOTYPE:
+            return
+
+        arg_list_pdb_types.insert(0, this_type)
+
+        has_self_symbol = any(
+            isinstance(symbol, CppRegisterSymbol)
+            and symbol.name.lower() == "self"
+            and symbol.data_type == this_type
+            and registers_match(symbol.register, "eax")
+            for symbol in symbols
+        )
+        if not has_self_symbol:
+            symbols.insert(0, CppRegisterSymbol("Self", this_type, "eax"))
 
     def get_function_list(self) -> list[PdbFunction]:
         handled = (

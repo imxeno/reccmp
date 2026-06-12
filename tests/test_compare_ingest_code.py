@@ -271,6 +271,37 @@ def test_load_code_match_line(db: EntityDb, lines_db: LinesDb, binfile: PEImage)
     assert entity.get("type") == EntityType.FUNCTION
 
 
+def test_load_delphi_code_match_line(db: EntityDb, lines_db: LinesDb, binfile: PEImage):
+    """Should match a Delphi function based on its Pascal source line."""
+    files = (
+        TextFile(
+            PurePath("Unit1.pas"),
+            dedent("""\
+                unit Unit1;
+
+                implementation
+
+                // FUNCTION: TEST 0x10038220
+                procedure TForm1.ButtonClick(Sender: TObject);
+                begin
+                end;
+                """),
+        ),
+    )
+
+    lines_db.add_line(PureWindowsPath("C:\\src\\Unit1.pas"), 6, 0x1234)
+    lines_db.mark_function_starts([0x1234])
+
+    with db.batch() as batch:
+        batch.set(ImageId.RECOMP, 0x1234)
+    load_markers(files, lines_db, binfile, "TEST", db)
+
+    entity = db.get(ImageId.ORIG, 0x10038220)
+    assert entity is not None
+    assert entity.recomp_addr == 0x1234
+    assert entity.get("type") == EntityType.FUNCTION
+
+
 def test_load_code_no_match_line(db: EntityDb, lines_db: LinesDb, binfile: PEImage):
     """Don't match the function if the line number does not match."""
     files = (

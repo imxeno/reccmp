@@ -284,6 +284,22 @@ def test_match_vtables(db):
     assert db.count() == 1
 
 
+def test_match_vtables_delphi_vmt(db):
+    """Delphi VMT symbols use unit-qualified class names."""
+    with db.batch() as batch:
+        batch.set(ImageId.ORIG, 100, name="TWidget", type=EntityType.VTABLE)
+        batch.set(
+            ImageId.RECOMP,
+            200,
+            name="Unit1.TWidget",
+            type=EntityType.VTABLE,
+        )
+
+    match_vtables(db)
+
+    assert db.get(ImageId.ORIG, 100).recomp_addr == 200
+
+
 def test_match_vtables_no_match_recomp_name(db):
     """Recomp entity name must be in a specific format"""
     with db.batch() as batch:

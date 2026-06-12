@@ -8,6 +8,7 @@ The configuration of `reccmp` requires three different files. As explained in th
   * If the names or paths of your build artifacts change, we recommend you generate this script as part of your build process.
   * If they do not, you can generate this file once and keep it in your build directory or at the repository root.
   * Note that as of this writing, the [plugin-based Ghidra import](../reccmp/ghidra/README.md#Setup-for-Ghidrathon) needs to have a `reccmp-build.yml` at the repository root.
+  * The symbol file is stored under the historical `pdb:` key. You can also use `symbols:`. Supported symbol sources are MSVC PDB files, Delphi 7 binaries with embedded TD32 debug information, and detailed Delphi MAP files.
 
 ## Additional information in `reccmp-project.yml`
 
@@ -30,3 +31,23 @@ targets:
 ```
 
 This tells the Ghidra import script to ignore certain types and functions.
+
+For a Delphi 7 target with embedded TD32 debug information, point `symbols:` at the recompiled binary:
+
+```yml
+project: ..
+targets:
+  APP:
+    path: App.exe
+    symbols: App.exe
+```
+
+Detailed MAP files are also supported as a fallback:
+
+```yml
+project: ..
+targets:
+  APP:
+    path: App.exe
+    symbols: App.map
+```

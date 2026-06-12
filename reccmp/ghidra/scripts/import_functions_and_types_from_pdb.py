@@ -211,6 +211,7 @@ try:
     reload_module("reccmp.compare.db")
     reload_module("reccmp.ghidra.importer.entity_names")
     reload_module("reccmp.ghidra.importer.exceptions")
+    reload_module("reccmp.ghidra.importer.calling_conventions")
     reload_module("reccmp.ghidra.importer.pdb_extraction")
     reload_module("reccmp.ghidra.importer.ghidra_helper")
     reload_module("reccmp.ghidra.importer.vtable_importer")

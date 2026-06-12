@@ -15,6 +15,7 @@ from reccmp.formats import (
     detect_image,
 )
 from reccmp.cvdump import Cvdump, CvdumpTypesParser, CvdumpAnalysis
+from reccmp.delphi import DelphiMapAnalysis, DelphiTd32Analysis
 from reccmp.types import EntityType, ImageId
 from reccmp.compare.event import (
     ReccmpReportProtocol,
@@ -74,7 +75,7 @@ class Compare:
     _db: EntityDb
     _lines_db: LinesDb
     code_files: list[TextFile]
-    cvdump_analysis: CvdumpAnalysis
+    cvdump_analysis: CvdumpAnalysis | DelphiMapAnalysis | DelphiTd32Analysis
     orig_bin: Image
     recomp_bin: Image
     report: ReccmpReportProtocol
@@ -92,7 +93,7 @@ class Compare:
         self,
         orig_bin: Image,
         recomp_bin: Image,
-        pdb_file: CvdumpAnalysis,
+        pdb_file: CvdumpAnalysis | DelphiMapAnalysis | DelphiTd32Analysis,
         target_id: str,
         encoding: str | None = None,
         code_files: list[TextFile] | None = None,
@@ -218,18 +219,31 @@ class Compare:
         origfile = detect_image(filepath=target.original_path)
         recompfile = detect_image(filepath=target.recompiled_path)
 
-        logger.info("Parsing %s ...", target.recompiled_pdb)
-        cvdump = (
-            Cvdump(str(target.recompiled_pdb))
-            .lines()
-            .globals()
-            .publics()
-            .symbols()
-            .section_contributions()
-            .types()
-            .run()
-        )
-        pdb_file = CvdumpAnalysis(cvdump)
+        logger.info("Parsing symbols from %s ...", target.recompiled_pdb)
+        symbol_suffix = target.recompiled_pdb.suffix.lower()
+        pdb_file: CvdumpAnalysis | DelphiMapAnalysis | DelphiTd32Analysis
+        if symbol_suffix == ".pdb":
+            cvdump = (
+                Cvdump(str(target.recompiled_pdb))
+                .lines()
+                .globals()
+                .publics()
+                .symbols()
+                .section_contributions()
+                .types()
+                .run()
+            )
+            pdb_file = CvdumpAnalysis(cvdump)
+        elif symbol_suffix == ".map":
+            pdb_file = DelphiMapAnalysis.from_file(
+                target.recompiled_pdb, encoding=target.encoding or "utf-8"
+            )
+        elif symbol_suffix in (".exe", ".dll"):
+            pdb_file = DelphiTd32Analysis.from_file(target.recompiled_pdb)
+        else:
+            raise ValueError(
+                f"Unsupported symbol file extension: {target.recompiled_pdb.suffix}"
+            )
 
         code_paths = source_code_search(target.source_paths)
         code_files = list(

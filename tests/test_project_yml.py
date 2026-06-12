@@ -1,7 +1,7 @@
 """Testing items specific to YML parsing/pydantic validation"""
 
 from pathlib import Path
-from reccmp.project.config import ProjectFile
+from reccmp.project.config import BuildFile, ProjectFile
 
 
 def test_project_without_csv():
@@ -158,3 +158,15 @@ def test_project_marker_aliases():
         """)
 
     assert p.targets["TEST"].marker_aliases == {"fun": "FUNCTION"}
+
+
+def test_build_file_symbols_alias():
+    build = BuildFile.from_str("""\
+        project: .
+        targets:
+            TEST:
+                path: test.exe
+                symbols: test.map
+        """)
+
+    assert build.targets["TEST"].pdb == Path("test.map")

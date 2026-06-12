@@ -10,6 +10,7 @@ from reccmp.formats.exceptions import (
 )
 from reccmp.formats import PEImage, TextFile
 from reccmp.cvdump import CvdumpTypesParser, CvdumpAnalysis
+from reccmp.delphi import DelphiMapAnalysis, DelphiTd32Analysis
 from reccmp.parser import DecompCodebase
 from reccmp.parser.marker import ProjectAliases
 from reccmp.types import EntityType, ImageId
@@ -25,14 +26,21 @@ from .lines import LinesDb
 logger = logging.getLogger(__name__)
 
 
-def load_cvdump_types(cvdump_analysis: CvdumpAnalysis, types: CvdumpTypesParser):
+def load_cvdump_types(
+    cvdump_analysis: CvdumpAnalysis | DelphiMapAnalysis | DelphiTd32Analysis,
+    types: CvdumpTypesParser,
+):
     # TODO: Populate the universal type database here when this exists. (#106)
     # For now, just copy the keys into another CvdumpTypesParser so we can use its API.
     types.keys.update(cvdump_analysis.types.keys)
     types.alerted_types = cvdump_analysis.types.alerted_types
 
 
-def load_cvdump(cvdump_analysis: CvdumpAnalysis, db: EntityDb, recomp_bin: PEImage):
+def load_cvdump(
+    cvdump_analysis: CvdumpAnalysis | DelphiMapAnalysis | DelphiTd32Analysis,
+    db: EntityDb,
+    recomp_bin: PEImage,
+):
     # Build the list of entries to insert to the DB.
     # In the rare case we have duplicate symbols for an address, ignore them.
     seen_addrs = set()
@@ -120,7 +128,9 @@ def load_cvdump(cvdump_analysis: CvdumpAnalysis, db: EntityDb, recomp_bin: PEIma
 
 
 def load_cvdump_lines(
-    cvdump_analysis: CvdumpAnalysis, lines_db: LinesDb, recomp_bin: PEImage
+    cvdump_analysis: CvdumpAnalysis | DelphiMapAnalysis | DelphiTd32Analysis,
+    lines_db: LinesDb,
+    recomp_bin: PEImage,
 ):
     for filename, values in cvdump_analysis.lines.items():
         lines = [

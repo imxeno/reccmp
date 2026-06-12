@@ -26,6 +26,11 @@ from .pdb_extraction import (
     CppRegisterSymbol,
     CppStackSymbol,
 )
+from .calling_conventions import (
+    BORLAND_REGISTER_CALL_TYPE,
+    ensure_borland_register_calling_convention,
+    registers_match,
+)
 from .ghidra_helper import (
     add_data_type_or_reuse_existing,
     get_class_namespace_and_name,
@@ -130,6 +135,8 @@ class PdbFunctionImporterFull(PdbFunctionImporter):
         self.signature = func.signature
 
         self.is_stub = func.is_stub
+        if self.signature.call_type == BORLAND_REGISTER_CALL_TYPE:
+            ensure_borland_register_calling_convention(api)
 
         if self.signature.class_type is not None:
             # Import the base class so the namespace exists
@@ -312,6 +319,8 @@ class PdbFunctionImporterFull(PdbFunctionImporter):
         ghidra_function.setName(self.name, SourceType.USER_DEFINED)
         ghidra_function.setParentNamespace(self.namespace)
         ghidra_function.setReturnType(self.return_type, SourceType.USER_DEFINED)
+        if self.signature.call_type == BORLAND_REGISTER_CALL_TYPE:
+            ensure_borland_register_calling_convention(self.api)
         ghidra_function.setCallingConvention(self.signature.call_type)
 
         if self.is_stub:
@@ -397,7 +406,7 @@ class PdbFunctionImporterFull(PdbFunctionImporter):
                 symbol
                 for symbol in self.signature.symbols
                 if isinstance(symbol, CppRegisterSymbol)
-                and symbol.register == register.lower()
+                and registers_match(symbol.register, register)
             ),
             None,
         )

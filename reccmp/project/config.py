@@ -116,12 +116,11 @@ class UserFile(YmlFileModel):
     targets: dict[str, UserFileTarget]
 
 
-@dataclass
-class BuildFileTarget:
+class BuildFileTarget(BaseModel):
     """Target schema for reccmp-build.yml"""
 
     path: Path
-    pdb: Path
+    pdb: Path = Field(validation_alias=AliasChoices("pdb", "symbols"))
 
 
 class BuildFile(YmlFileModel):

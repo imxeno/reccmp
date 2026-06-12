@@ -9,7 +9,7 @@ import colorama
 import reccmp
 import reccmp.color
 from reccmp.dir import source_code_search
-from reccmp.parser import DecompParser, ReccmpParserResult
+from reccmp.parser import ReccmpParserResult, get_parser_for_path
 from reccmp.parser.marker import MarkerType, ProjectAliases, normalize_project_aliases
 from reccmp.parser.linter import (
     check_byname_allowed,
@@ -167,7 +167,7 @@ def decomplint_parse_args(
 
 
 def parse_file(file: TextFile, aliases: ProjectAliases | None) -> ReccmpParserResult:
-    parser = DecompParser(aliases)
+    parser = get_parser_for_path(file.path, aliases)
     parser.reset_and_set_filename(file.path)
     parser.read(file.text)
     parser.finish()

@@ -38,6 +38,16 @@ MxCore* MxObjectFactory::Create(const char* p_name)
 }
 ```
 
+For Delphi/Object Pascal sources, use the same `//` annotation comments above the routine implementation:
+
+```pascal
+// FUNCTION: APP 0x00401234
+procedure TMainForm.ButtonClick(Sender: TObject);
+begin
+  // implementation
+end;
+```
+
 ### Annotating a comment of the function name
 
 There are situations where the previous kind of annotation is not possible. Typical examples are:
@@ -177,6 +187,13 @@ MxAtomId* g_pz5Script = NULL;
 MxAtomId* g_introScript = NULL;
 ```
 
+In Delphi/Object Pascal:
+
+```pascal
+// GLOBAL: APP 0x00424010
+GlobalValue: Integer;
+```
+
 ## Strings
 
 String values should be annotated using the `STRING` marker, which includes the module name and address of the text content. Note that this is usually not required since most strings can be auto-detected. If you want, you can use this for bookkeeping, but it will usually not affect the `reccmp` match.
@@ -187,6 +204,13 @@ inline virtual const char* ClassName() const override // vtable+0x0c
     // STRING: LEGO1 0x100f03fc
     return "Act2PoliceStation";
 }
+```
+
+In Delphi/Object Pascal, single-quoted string literals are supported:
+
+```pascal
+// STRING: APP 0x00425000
+Greeting = 'Hello';
 ```
 
 String constants can have a distinct `STRING` and `GLOBAL` address at the same time. The `STRING` points at the actual text while the `GLOBAL` is a _pointer_ to the text:

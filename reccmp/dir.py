@@ -134,18 +134,30 @@ class PathResolver:
         return self._memo[path_str]
 
 
+SOURCE_EXTENSIONS = (
+    ".c",
+    ".h",
+    ".cc",
+    ".hh",
+    ".cxx",
+    ".hxx",
+    ".cpp",
+    ".hpp",
+    ".pas",
+    ".dpr",
+    ".dpk",
+    ".inc",
+)
+
+
 def is_file_c_like(path: Path) -> bool:
     """Tests the given path for typical C/C++ file extensions."""
-    return path.suffix.lower() in (
-        ".c",
-        ".h",
-        ".cc",
-        ".hh",
-        ".cxx",
-        ".hxx",
-        ".cpp",
-        ".hpp",
-    )
+    return path.suffix.lower() in SOURCE_EXTENSIONS[:8]
+
+
+def is_file_source(path: Path) -> bool:
+    """Tests the given path for source file extensions that reccmp can parse."""
+    return path.suffix.lower() in SOURCE_EXTENSIONS
 
 
 def platform_independent_path_sort(paths: Iterable[Path]) -> Iterator[Path]:
@@ -160,13 +172,13 @@ def platform_independent_path_sort(paths: Iterable[Path]) -> Iterator[Path]:
 
 
 def walk_source_dir(source: Path, *, recursive: bool = True) -> Iterator[Path]:
-    """Returns any C/C++ source code files found in the given directory tree."""
+    """Returns any supported source code files found in the given directory tree."""
 
     # Python 3.12 introduced Path.walk(). We use os.walk() instead for broader compatibility.
     for subdir, _, files in os.walk(source.absolute()):
         for file in files:
             path = Path(os.path.join(subdir, file))
-            if is_file_c_like(path):
+            if is_file_source(path):
                 yield path
 
         if not recursive:
@@ -190,7 +202,7 @@ def source_code_search(search_paths: Path | Iterable[Path]) -> Iterator[Path]:
         # Resolve removes `..` references.
         path = path.resolve()
 
-        if path.is_file() and is_file_c_like(path):
+        if path.is_file() and is_file_source(path):
             code_files.add(path)
             continue
 

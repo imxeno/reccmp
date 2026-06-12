@@ -124,6 +124,13 @@ class LfEnumAttrs(TypedDict):
     underlying_type: NotRequired[CvdumpTypeKey]
 
 
+class CvdumpCallConvention(TypedDict):
+    raw_value: int
+    base_value: int
+    fastthis: bool
+    name: str
+
+
 class CvdumpParsedType(TypedDict):
     type: str  # leaf type
 
@@ -164,6 +171,7 @@ class CvdumpParsedType(TypedDict):
     # LF_PROCEDURE / LF_MFUNCTION
     return_type: NotRequired[CvdumpTypeKey]
     call_type: NotRequired[str]
+    call_type_info: NotRequired[CvdumpCallConvention]
     class_type: NotRequired[CvdumpTypeKey]
     this_type: NotRequired[CvdumpTypeKey]
     func_attr: NotRequired[str]
@@ -321,9 +329,10 @@ class CvdumpTypesParser:
             raise CvdumpIntegrityError("No array element type")
 
         array_element_size = self.get(array_type).size
-        assert (
-            array_element_size is not None
-        ), "Encountered an array whose type has no size"
+        if array_element_size is None or array_element_size <= 0:
+            raise CvdumpIntegrityError(
+                f"Array element type {array_type} has no positive size"
+            )
 
         n_elements = type_obj["size"] // array_element_size
 

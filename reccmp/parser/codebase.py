@@ -1,9 +1,11 @@
 """For aggregating decomp markers read from an entire directory and for a single module."""
 
 from typing import Callable, Iterable, Iterator
+from pathlib import PurePath
 from reccmp.formats import TextFile
 from .marker import ProjectAliases
 from .parser import DecompParser
+from .delphi import DelphiParser
 from .node import (
     ParserLineSymbol,
     ParserSymbol,
@@ -12,6 +14,19 @@ from .node import (
     ParserVariable,
     ParserString,
 )
+
+Parser = DecompParser | DelphiParser
+
+
+def get_parser_for_path(
+    path: PurePath, aliases: ProjectAliases | None = None
+) -> Parser:
+    """Select a source parser based on the source file extension."""
+
+    if path.suffix.lower() in (".pas", ".dpr", ".dpk", ".inc"):
+        return DelphiParser(aliases)
+
+    return DecompParser(aliases)
 
 
 class DecompCodebase:
@@ -23,8 +38,8 @@ class DecompCodebase:
     ) -> None:
         self._symbols: list[ParserSymbol] = []
 
-        parser = DecompParser(aliases)
         for f in files:
+            parser = get_parser_for_path(f.path, aliases)
             parser.reset_and_set_filename(f.path)
             parser.read(f.text)
 

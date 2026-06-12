@@ -7,6 +7,7 @@ from reccmp.compare.event import (
     reccmp_report_nop,
 )
 from reccmp.compare.queries import get_referencing_entity_matches
+from reccmp.delphi.td32 import normalize_delphi_name
 from reccmp.types import ImageId
 
 
@@ -197,6 +198,7 @@ def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop
     We assume only one of the above will appear for a given class."""
 
     vtable_name_index = EntityIndex()
+    delphi_vtable_name_index = EntityIndex()
 
     for ent in db.unmatched(ImageId.RECOMP):
         name = ent.get("name")
@@ -205,6 +207,12 @@ def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop
 
         assert ent.recomp_addr is not None
         vtable_name_index.add(name, ent.recomp_addr)
+        delphi_name = normalize_delphi_name(name)
+        if delphi_name and "." in delphi_name:
+            delphi_vtable_name_index.add(delphi_name, ent.recomp_addr)
+            short_name = delphi_name.rsplit(".", 1)[-1]
+            if short_name != delphi_name:
+                delphi_vtable_name_index.add(short_name, ent.recomp_addr)
 
     with db.batch() as batch:
         for ent in db.unmatched(ImageId.ORIG):
@@ -232,6 +240,12 @@ def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop
 
             if for_vftable in vtable_name_index:
                 recomp_addr = vtable_name_index.pop(for_vftable)
+                batch.match(ent.orig_addr, recomp_addr)
+                continue
+
+            delphi_class_name = normalize_delphi_name(class_name)
+            if delphi_class_name and delphi_class_name in delphi_vtable_name_index:
+                recomp_addr = delphi_vtable_name_index.pop(delphi_class_name)
                 batch.match(ent.orig_addr, recomp_addr)
                 continue
 

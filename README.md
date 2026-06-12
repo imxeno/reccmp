@@ -17,7 +17,37 @@ This allows you to automatically verify the accuracy of functions, virtual table
 
 You can supplement the code annotations with metadata from CSV files. See the [instructions and syntax](docs/csv.md).
 
-At the moment, C++ compiled to 32-bit x86 with old versions of MSVC (like 4.20) is supported. Work on support for newer MSVC versions is in progress - testing and bug reports are greatly appreciated. Other compilers, languages and architectures are not supported at the moment, but feel free to contribute if you wish to do so!
+At the moment, upstream `reccmp` primarily supports C++ compiled to 32-bit x86 with old versions of MSVC (like 4.20). Work on support for newer MSVC versions is in progress - testing and bug reports are greatly appreciated.
+
+**This fork adds Delphi 7 / Object Pascal Win32 compatibility.**
+
+## Delphi compatibility in this fork
+
+The primary supported Delphi path is a Delphi 7 Win32 recompiled `.exe` or `.dll` with embedded TD32 debug information. To produce this, enable compiler debug information (`{$D+}` / Debug information) and Include TD32 debug info, then point `symbols:` at the recompiled binary.
+
+Changes vs upstream:
+
+* Embedded TD32 extraction from Delphi 7 Win32 PE files.
+* Detailed Delphi MAP files as a fallback for symbols and source lines (was useful while coding the fork, but you probably shouldn't use it).
+* Function/public/global/static-data ingestion into the same comparison model used by the MSVC/PDB path.
+* Source line matching for Pascal units.
+* Stack locals, parameters, register symbols, and function sizes from TD32.
+* Delphi type records needed for comparison and Ghidra import, including scalars, pointers, arrays, enums, records/classes/objects, fields, and method/function signatures.
+* Delphi VMT support using Pascal annotations plus TD32 type/symbol metadata, comparing the virtual-method pointer region instead of unrelated VMT runtime metadata.
+* Delphi name normalization for observed Delphi 7 TD32 symbols.
+* Delphi Win32 register calling convention support via a Ghidra `__borland_register` compiler-spec extension.
+
+Not implemented or intentionally out of scope for now:
+
+* Broad Delphi/C++Builder demangling beyond the compiler decorations observed in current Delphi 7 fixtures.
+* Ghidra import for Pascal `Near Pascal` calling convention. It is decoded, but currently rejected during import until a real fixture proves it is needed.
+* First-class Ghidra import for Delphi procedure-typed fields, property records, and variant/union-like layouts. Current support is enough for many layout and byte-comparison workflows, but these can be improved.
+
+Future work that would be useful:
+
+* Add ESP-relative stack-symbol matching for optimized/no-frame-pointer recompiles if `stackcmp` output needs it.
+* Improve Ghidra type import for procedural variables, event-handler fields, Delphi properties, variants, and unions.
+* Add real Delphi 7 fixtures covering additional RTL/VCL patterns, calling conventions, exceptions, interfaces, and compiler helpers.
 
 ## Getting started
 
@@ -65,7 +95,7 @@ All scripts will become available to use in your terminal with the `reccmp-` pre
   * Diff against the aggregate: `reccmp-aggregate --samples ./sample0.json ./sample1.json ./sample2.json --diff ./before.json`
 * [`decomplint`](/reccmp/tools/decomplint.py): Checks the decompilation annotations (see above)
   * e.g. `reccmp-decomplint --target LEGO1`
-* [`reccmp`](/reccmp/tools/asmcmp.py): Compares an original binary with a recompiled binary, provided a PDB file. For example:
+* [`reccmp`](/reccmp/tools/asmcmp.py): Compares an original binary with a recompiled binary, provided a supported symbol source (PDB, embedded Delphi TD32, or detailed Delphi MAP). For example:
   * Display the diff for a single function: `reccmp-reccmp --target LEGO1 --verbose 0x100ae1a0`
   * Generate an HTML report: `reccmp-reccmp --target LEGO1 --html output.html`
   * Create a base file for diffs: `reccmp-reccmp --target LEGO1 --json base.json --silent`

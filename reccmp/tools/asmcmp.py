@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(
         allow_abbrev=False,
-        description="Recompilation Compare: compare an original EXE with a recompiled EXE + PDB.",
+        description="Recompilation Compare: compare an original EXE with a recompiled EXE + symbols.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {reccmp.VERSION}"
