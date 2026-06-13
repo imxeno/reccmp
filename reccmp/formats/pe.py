@@ -687,6 +687,9 @@ class PEImage(Image):
                 break
 
             rva_ilt, _, __, dll_name, rva_iat = image_import_descriptor
+            if rva_ilt == 0:
+                rva_ilt = rva_iat
+
             # Convert relative virtual addresses into absolute
             yield (
                 self.imagebase + rva_ilt,

@@ -3,6 +3,8 @@
 2. Provides an interface to read from the DLL or EXE using a virtual address.
 These are some basic smoke tests."""
 
+import struct
+
 import pytest
 from reccmp.formats.image import ImageImport, ImageSectionFlags
 from reccmp.formats import PEImage
@@ -157,6 +159,29 @@ IMPORT_REFS = (
 @pytest.mark.parametrize("import_ref", IMPORT_REFS)
 def test_imports(import_ref: tuple[str, str, int], binfile: PEImage):
     assert import_ref in tuple(binfile.imports)
+
+
+def test_import_descriptors_use_iat_when_lookup_table_rva_is_zero():
+    class ImportDirectory:
+        virtual_address = 0x403000
+
+    class FakePE:
+        imagebase = 0x400000
+
+        def get_data_directory_region(self, _):
+            return ImportDirectory()
+
+        def read(self, addr: int, size: int) -> bytes:
+            assert size == 20
+            if addr == 0x403000:
+                return struct.pack("<5I", 0, 0, 0, 0x2000, 0x1000)
+            if addr == 0x403014:
+                return b"\0" * 20
+            raise AssertionError(f"unexpected read at 0x{addr:x}")
+
+    descriptors = list(PEImage.get_import_descriptors(FakePE()))
+
+    assert descriptors == [(0x401000, 0x402000, 0x401000)]
 
 
 def test_exports(binfile: PEImage):
