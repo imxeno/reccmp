@@ -633,9 +633,14 @@ class PEImage(Image):
             # 2 bytes, and these are added to the base to get the full location.
             # If the entry read in is zero, we are at the end of this section and
             # these are padding bytes.
-            while True:
+            # Some PE linkers pad .reloc beyond the data-directory size. Because
+            # we parse the section view here, stop before a short or malformed
+            # padding tail can be interpreted as another block header.
+            while ofs + 8 <= len(reloc):
                 page_base, block_size = struct.unpack("<2I", reloc[ofs : ofs + 8])
                 if block_size == 0:
+                    break
+                if block_size < 8 or ofs + block_size > len(reloc):
                     break
 
                 values = [
