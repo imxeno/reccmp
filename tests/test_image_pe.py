@@ -4,6 +4,7 @@
 These are some basic smoke tests."""
 
 import struct
+from typing import cast
 
 import pytest
 from reccmp.formats.image import ImageImport, ImageSectionFlags
@@ -179,7 +180,7 @@ def test_import_descriptors_use_iat_when_lookup_table_rva_is_zero():
                 return b"\0" * 20
             raise AssertionError(f"unexpected read at 0x{addr:x}")
 
-    descriptors = list(PEImage.get_import_descriptors(FakePE()))
+    descriptors = list(PEImage.get_import_descriptors(cast(PEImage, FakePE())))
 
     assert descriptors == [(0x401000, 0x402000, 0x401000)]
 

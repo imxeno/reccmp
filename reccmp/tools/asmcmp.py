@@ -62,7 +62,8 @@ def print_match_verbose(match: DiffReport, show_both_addrs: bool = False):
     udiff = raw_diff_to_udiff(match.result.diff, grouped=grouped_diff)
 
     if match.effective_ratio == 1.0:
-        ok_text = reccmp.color.Fore.GREEN + "✨ OK! ✨" + reccmp.color.Style.RESET_ALL
+        ok_marker = reccmp.color.safe_console_text("✨ OK! ✨", "OK!")
+        ok_text = reccmp.color.Fore.GREEN + ok_marker + reccmp.color.Style.RESET_ALL
         if match.ratio == 1.0:
             print(f"{addrs}: {match.name} 100% match.\n\n{ok_text}\n\n")
         else:

@@ -1,4 +1,7 @@
 import os
+import sys
+from typing import TextIO
+
 import colorama
 
 
@@ -45,6 +48,25 @@ def enable_color(enable: bool) -> None:
         setup_colorama()
     else:
         setup_plain()
+
+
+def safe_console_text(
+    preferred: str, fallback: str, stream: TextIO | None = None
+) -> str:
+    """Return text that can be encoded by the active console stream."""
+
+    if stream is None:
+        stream = sys.stdout
+
+    if stream.encoding is None:
+        return preferred
+
+    try:
+        preferred.encode(stream.encoding)
+    except (LookupError, UnicodeEncodeError):
+        return fallback
+
+    return preferred
 
 
 enable_color(True)
