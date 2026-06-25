@@ -1,8 +1,10 @@
 """Testing lines database: mapping between (filename, line_number) to virtual address."""
 
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import PurePath, PurePosixPath, PureWindowsPath
+from textwrap import dedent
 import pytest
 from reccmp.compare.lines import LinesDb
+from reccmp.parser.delphi import DelphiParser
 
 # For tests that don't require path conversion, parametrize the
 # input local_path so that we test both Windows and Posix paths.
@@ -195,3 +197,36 @@ def test_db_search_line(local_path: PureWindowsPath | PurePosixPath):
 
     lines.mark_function_starts((0x1234,))
     assert [*lines.search_line(local_path, 2, 5, start_only=True)] == [0x1234]
+
+
+def test_delphi_nested_outer_function_matches_outer_body_line():
+    parser = DelphiParser()
+    source_path = PurePath("Unit1.pas")
+    parser.reset_and_set_filename(source_path)
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x1000
+        function Outer: Boolean;
+          function Inner: Boolean;
+          begin
+            Result := False;
+          end;
+        begin
+          Result := Inner;
+        end;
+        """))
+
+    assert len(parser.alerts) == 0
+    assert len(parser.functions) == 1
+    function = parser.functions[0]
+
+    lines = LinesDb()
+    lines.add_local_paths([source_path])
+    lines.add_line(PureWindowsPath("Unit1.pas"), 8, 0x5000)
+    lines.add_line(PureWindowsPath("Unit1.pas"), 11, 0x5100)
+    lines.mark_function_starts([0x5000, 0x5100])
+
+    assert lines.find_function(function.filename, function.line_number, function.end_line) == 0x5100

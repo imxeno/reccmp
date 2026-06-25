@@ -102,5 +102,66 @@ def test_delphi_nested_routine_before_outer_body():
 
     assert len(parser.alerts) == 0
     assert len(parser.functions) == 1
-    assert parser.functions[0].line_number == 6
+    assert parser.functions[0].line_number == 10
     assert parser.functions[0].end_line == 11
+
+
+def test_delphi_multiple_nested_routines_before_outer_body():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x7000
+        function Outer: Boolean;
+          function First: Boolean;
+          begin
+            Result := True;
+          end;
+
+          procedure Second;
+          begin
+          end;
+        begin
+          Result := First;
+        end;
+        """))
+
+    assert len(parser.alerts) == 0
+    assert len(parser.functions) == 1
+    assert parser.functions[0].line_number == 15
+    assert parser.functions[0].end_line == 17
+
+
+def test_delphi_nested_routine_with_inner_blocks_before_outer_body():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x8000
+        procedure Outer;
+          procedure Inner;
+          var
+            Value: record
+              X: Integer;
+            end;
+          begin
+            try
+              case Value.X of
+                0: Value.X := 1;
+              end;
+            finally
+              Value.X := 2;
+            end;
+          end;
+        begin
+        end;
+        """))
+
+    assert len(parser.alerts) == 0
+    assert len(parser.functions) == 1
+    assert parser.functions[0].line_number == 21
+    assert parser.functions[0].end_line == 22

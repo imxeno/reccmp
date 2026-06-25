@@ -9,12 +9,8 @@ def file_is_header(path: PurePath) -> bool:
     return path.suffix.lower() in (".h", ".hpp")
 
 
-def file_is_cpp_implementation(path: PurePath) -> bool:
-    return path.suffix.lower() in (".c", ".cc", ".cpp", ".cxx")
-
-
 def check_byname_allowed(result: ReccmpParserResult) -> list[ParserAlert]:
-    if not file_is_cpp_implementation(result.path):
+    if file_is_header(result.path):
         return []
 
     alerts = []

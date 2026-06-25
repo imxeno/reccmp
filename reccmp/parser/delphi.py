@@ -183,6 +183,7 @@ class DelphiParser:
 
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
+        self._nested_routine_seen = False
 
     def reset_and_set_filename(self, filename: PurePath):
         self._symbols = []
@@ -203,6 +204,7 @@ class DelphiParser:
         self._resume_state_after_variable = None
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
+        self._nested_routine_seen = False
 
     @property
     def functions(self) -> list[ParserFunction]:
@@ -234,6 +236,7 @@ class DelphiParser:
         self._resume_state_after_variable = None
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
+        self._nested_routine_seen = False
 
     def _syntax_warning(self, code: AlertCode):
         self.alerts.append(
@@ -307,6 +310,7 @@ class DelphiParser:
         self.state = ReaderState.SEARCH
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
+        self._nested_routine_seen = False
 
     def _vtable_marker(self, marker: DecompMarker):
         if self.tbl_markers.insert(marker):
@@ -501,6 +505,7 @@ class DelphiParser:
 
         if self._nested_routine_pending:
             if self._has_block_start(line):
+                self._nested_routine_seen = True
                 self._nested_routine_depth = self._block_delta(line)
                 if self._nested_routine_depth <= 0:
                     self._nested_routine_pending = False
@@ -512,6 +517,8 @@ class DelphiParser:
             return
 
         if self._has_block_start(line):
+            if self._nested_routine_seen:
+                self.function_start = self.line_number
             self._start_or_update_function_body(line)
 
     def read_line(self, line: str):
