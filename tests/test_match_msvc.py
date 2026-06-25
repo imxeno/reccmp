@@ -1,5 +1,6 @@
 """Tests MSVC-specific match strategies"""
 
+import logging
 from unittest.mock import Mock, ANY, patch
 import pytest
 from reccmp.types import EntityType, ImageId
@@ -905,3 +906,48 @@ def test_match_imports(db: EntityDb):
     e = db.get(ImageId.ORIG, 200)
     assert e is not None
     assert e.recomp_addr == 200
+
+
+def test_match_imports_duplicate_names_pair_by_address_order_without_collisions(
+    db: EntityDb, caplog
+):
+    """Duplicate imports should pair by address order without staging collisions."""
+    with db.batch() as batch:
+        batch.set(ImageId.ORIG, 200, type=EntityType.IMPORT, name="TEST.DLL::Same")
+        batch.set(ImageId.ORIG, 100, type=EntityType.IMPORT, name="TEST.DLL::Same")
+        batch.set(ImageId.RECOMP, 600, type=EntityType.IMPORT, name="TEST.DLL::Same")
+        batch.set(ImageId.RECOMP, 500, type=EntityType.IMPORT, name="TEST.DLL::Same")
+
+    with caplog.at_level(logging.WARNING):
+        match_imports(db)
+
+    assert db.get(ImageId.ORIG, 100).recomp_addr == 500
+    assert db.get(ImageId.ORIG, 200).recomp_addr == 600
+    assert "collides with previous staged match" not in caplog.text
+
+
+def test_match_imports_duplicate_names_match_minimum_count(db: EntityDb):
+    """Unequal duplicate counts should leave extra imports unmatched."""
+    with db.batch() as batch:
+        batch.set(ImageId.ORIG, 100, type=EntityType.IMPORT, name="TEST.DLL::Same")
+        batch.set(ImageId.ORIG, 200, type=EntityType.IMPORT, name="TEST.DLL::Same")
+        batch.set(ImageId.RECOMP, 500, type=EntityType.IMPORT, name="TEST.DLL::Same")
+
+    match_imports(db)
+
+    assert db.get(ImageId.ORIG, 100).recomp_addr == 500
+    assert db.get(ImageId.ORIG, 200).recomp_addr is None
+
+
+def test_match_imports_duplicate_names_case_insensitive(db: EntityDb):
+    """Duplicate import matching remains case-insensitive."""
+    with db.batch() as batch:
+        batch.set(ImageId.ORIG, 100, type=EntityType.IMPORT, name="Test.Dll::Same")
+        batch.set(ImageId.ORIG, 200, type=EntityType.IMPORT, name="test.dll::same")
+        batch.set(ImageId.RECOMP, 500, type=EntityType.IMPORT, name="TEST.DLL::SAME")
+        batch.set(ImageId.RECOMP, 600, type=EntityType.IMPORT, name="TEST.dll::same")
+
+    match_imports(db)
+
+    assert db.get(ImageId.ORIG, 100).recomp_addr == 500
+    assert db.get(ImageId.ORIG, 200).recomp_addr == 600

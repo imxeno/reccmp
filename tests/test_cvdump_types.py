@@ -3,6 +3,7 @@ and type dependency tree walker."""
 
 # pylint:disable=too-many-lines
 
+import logging
 from struct import calcsize
 from typing import Iterable
 import pytest
@@ -1215,3 +1216,14 @@ def test_bitfields(empty_parser: CvdumpTypesParser):
     assert empty_parser.keys[TK(0x1003)]["bit_start"] == 6
     assert empty_parser.keys[TK(0x1003)]["bit_count"] == 3
     assert empty_parser.keys[TK(0x1003)]["bit_type"] == CVInfoTypeEnum.T_UINT4
+
+
+def test_verified_delphi_primitive_types_do_not_log_unverified(caplog):
+    parser = CvdumpTypesParser()
+
+    with caplog.at_level(logging.INFO):
+        parser.get(CVInfoTypeEnum.T_BOOL08)
+        parser.get(CVInfoTypeEnum.T_REAL80)
+        parser.get(CVInfoTypeEnum.T_PASCHAR)
+
+    assert "Unverified primitive type" not in caplog.text

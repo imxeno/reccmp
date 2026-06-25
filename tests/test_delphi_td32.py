@@ -1,3 +1,4 @@
+import logging
 import struct
 from pathlib import PureWindowsPath
 
@@ -401,3 +402,24 @@ targets:
     assert build.targets["TEST"].path == binary
     assert build.targets["TEST"].pdb == binary
     assert has_embedded_td32(binary)
+
+
+def test_known_ignored_td32_symbol_types_do_not_log_unhandled(caplog):
+    parser = DelphiTd32Parser()
+
+    with caplog.at_level(logging.INFO):
+        parser._parse_symbol_record(0x0208, b"")
+        parser._parse_symbol_record(0x0211, b"")
+
+    assert "Unhandled TD32 symbol type" not in caplog.text
+    assert not ({0x0208, 0x0211} & parser.unhandled_symbols)
+
+
+def test_known_ignored_td32_type_leaf_does_not_log_unhandled(caplog):
+    parser = DelphiTd32Parser()
+
+    with caplog.at_level(logging.INFO):
+        assert parser._parse_type_record(CvdumpTypeKey(0x1000), 0x0034, b"") is None
+
+    assert "Unhandled TD32 type leaf" not in caplog.text
+    assert 0x0034 not in parser.unhandled_types

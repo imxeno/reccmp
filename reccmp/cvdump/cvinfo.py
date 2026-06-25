@@ -56,7 +56,7 @@ _CVINFO_TYPES: tuple[CvInfoType, ...] = (
     CvInfoType(key=CvdumpTypeKey(0x0006),  name="T_FBASICSTR",    fmt="",     size=0,   pointer=None,                   verified=False), # Far BASIC string
     CvInfoType(key=CvdumpTypeKey(0x0007),  name="T_NOTTRANS",     fmt="",     size=0,   pointer=None,                   verified=False), # type not translated by cvpack
     CvInfoType(key=CvdumpTypeKey(0x0060),  name="T_BIT",          fmt="",     size=0,   pointer=None,                   verified=False), # bit
-    CvInfoType(key=CvdumpTypeKey(0x0061),  name="T_PASCHAR",      fmt="",     size=0,   pointer=None,                   verified=False), # Pascal CHAR
+    CvInfoType(key=CvdumpTypeKey(0x0061),  name="T_PASCHAR",      fmt="",     size=0,   pointer=None,                   verified=True),  # Pascal CHAR
     CvInfoType(key=CvdumpTypeKey(0x0062),  name="T_BOOL32FF",     fmt="i",    size=4,   pointer=None,                   verified=False), # 32-bit BOOL where true is 0xffffffff
 
     # void types
@@ -347,7 +347,7 @@ _CVINFO_TYPES: tuple[CvInfoType, ...] = (
     CvInfoType(key=CvdumpTypeKey(0x0641),  name="T_64PREAL64",    fmt="Q",    size=8,   pointer=CvdumpTypeKey(0x0041),  verified=False), # 64 bit pointer to 64 bit real
 
     # 80-bit real types
-    CvInfoType(key=CvdumpTypeKey(0x0042),  name="T_REAL80",       fmt="10B",  size=10,  pointer=None,                   verified=False), # 80 bit real
+    CvInfoType(key=CvdumpTypeKey(0x0042),  name="T_REAL80",       fmt="10B",  size=10,  pointer=None,                   verified=True),  # 80 bit real
     CvInfoType(key=CvdumpTypeKey(0x0142),  name="T_PREAL80",      fmt="H",    size=2,   pointer=CvdumpTypeKey(0x0042),  verified=False), # 16 bit pointer to 80 bit real
     CvInfoType(key=CvdumpTypeKey(0x0242),  name="T_PFREAL80",     fmt="I",    size=4,   pointer=CvdumpTypeKey(0x0042),  verified=False), # 16:16 far pointer to 80 bit real
     CvInfoType(key=CvdumpTypeKey(0x0342),  name="T_PHREAL80",     fmt="I",    size=4,   pointer=CvdumpTypeKey(0x0042),  verified=False), # 16:16 huge pointer to 80 bit real
@@ -401,7 +401,7 @@ _CVINFO_TYPES: tuple[CvInfoType, ...] = (
     CvInfoType(key=CvdumpTypeKey(0x0653),  name="T_64PCPLX128",   fmt="Q",    size=8,   pointer=CvdumpTypeKey(0x0053),  verified=False), # 64 bit pointer to 128 bit complex
 
     # 8-bit boolean types
-    CvInfoType(key=CvdumpTypeKey(0x0030),  name="T_BOOL08",       fmt="B",    size=1,   pointer=None,                   verified=False), # 8 bit boolean
+    CvInfoType(key=CvdumpTypeKey(0x0030),  name="T_BOOL08",       fmt="B",    size=1,   pointer=None,                   verified=True),  # 8 bit boolean
     CvInfoType(key=CvdumpTypeKey(0x0130),  name="T_PBOOL08",      fmt="H",    size=2,   pointer=CvdumpTypeKey(0x0030),  verified=False), # 16 bit pointer to  8 bit boolean
     CvInfoType(key=CvdumpTypeKey(0x0230),  name="T_PFBOOL08",     fmt="I",    size=4,   pointer=CvdumpTypeKey(0x0030),  verified=False), # 16:16 far pointer to  8 bit boolean
     CvInfoType(key=CvdumpTypeKey(0x0330),  name="T_PHBOOL08",     fmt="I",    size=4,   pointer=CvdumpTypeKey(0x0030),  verified=False), # 16:16 huge pointer to  8 bit boolean

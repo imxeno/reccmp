@@ -68,6 +68,8 @@ SYMBOL_TYPES_IGNORED = {
     0x0025,
     0x0026,
     0x0027,
+    0x0208,
+    0x0211,
     0x0230,
 }
 SYMBOL_TYPE_BPREL32 = 0x0200
@@ -93,6 +95,7 @@ TYPE_PAS_SET = 0x0030
 TYPE_PAS_SUBRANGE = 0x0031
 TYPE_PAS_PARRAY = 0x0032
 TYPE_PAS_PSTRING = 0x0033
+TYPE_PAS_UNKNOWN34 = 0x0034
 TYPE_PAS_PROPERTY = 0x0035
 TYPE_PAS_LSTRING = 0x0036
 TYPE_PAS_VARIANT = 0x0037
@@ -723,6 +726,10 @@ class DelphiTd32Parser:
 
             if leaf in (TYPE_PAS_PSTRING, TYPE_PAS_LSTRING, TYPE_PAS_CLASSREF):
                 return {"type": "LF_POINTER", "element_type": CVInfoTypeEnum.T_VOID}
+
+            if leaf == TYPE_PAS_UNKNOWN34:
+                reader.offset = reader.end
+                return None
 
             if leaf == TYPE_PAS_PROPERTY:
                 reader.offset = reader.end

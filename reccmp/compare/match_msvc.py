@@ -1,3 +1,4 @@
+from collections import defaultdict, deque
 from reccmp.types import EntityType
 from reccmp.compare.db import EntityDb
 from reccmp.compare.lines import LinesDb
@@ -483,7 +484,7 @@ def match_ref(
 
 
 def match_imports(db: EntityDb):
-    orig_imports = {}
+    orig_imports_by_name = defaultdict(deque)
 
     # n.b. Case insensitive match here to preserve previous behavior.
     # The final entity will use the name from the recomp side.
@@ -496,7 +497,7 @@ def match_imports(db: EntityDb):
             continue
 
         assert isinstance(ent.orig_addr, int)
-        orig_imports[name.upper()] = ent.orig_addr
+        orig_imports_by_name[name.upper()].append(ent.orig_addr)
 
     with db.batch() as batch:
         for ent in db.unmatched(ImageId.RECOMP):
@@ -507,7 +508,9 @@ def match_imports(db: EntityDb):
             if not name:
                 continue
 
-            orig_addr = orig_imports.get(name.upper())
-            if orig_addr is not None:
+            orig_addrs = orig_imports_by_name.get(name.upper())
+            if orig_addrs:
+                orig_addr = orig_addrs.popleft()
                 assert isinstance(ent.recomp_addr, int)
                 batch.match(orig_addr, ent.recomp_addr)
+

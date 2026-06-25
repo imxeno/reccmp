@@ -95,17 +95,19 @@ def test_order_reports_all_modules():
     assert {alert.target for alert in alerts} == {"ALPHA"}
 
 
-def test_byname_headers_only():
-    """Markers referenced by name belong in header files only."""
+def test_byname_allowed_in_headers_and_pascal_but_not_cpp():
+    """Markers referenced by name are valid in headers and Pascal sources."""
     code = """\
-        // FUNCTION: TEST 0x1000
+        // SYNTHETIC: TEST 0x1000
         // MyClass::~MyClass
         """
 
     result_cpp = create_parser_result(code, PurePath("test.cpp"))
     result_h = create_parser_result(code, PurePath("test.h"))
+    result_pas = create_parser_result(code, PurePath("test.pas"))
 
     assert not check_byname_allowed(result_h)
+    assert not check_byname_allowed(result_pas)
 
     alerts = check_byname_allowed(result_cpp)
     assert alerts[0].code == AlertCode.BYNAME_FUNCTION_IN_CPP
