@@ -112,13 +112,19 @@ def load_cvdump(
                 )
             else:
                 # Non-string entities.
+                values = {
+                    "type": sym.node_type,
+                    "name": sym.name(),
+                    "symbol": sym.decorated_name,
+                    "size": sym.size(),
+                }
+                if sym.owner_unit is not None:
+                    values["owner_unit"] = sym.owner_unit
+
                 batch.set(
                     ImageId.RECOMP,
                     addr,
-                    type=sym.node_type,
-                    name=sym.name(),
-                    symbol=sym.decorated_name,
-                    size=sym.size(),
+                    **values,
                 )
 
                 # Set the cvdump type key so it can be referenced later.

@@ -33,11 +33,25 @@ _line_pair_regex = re.compile(
 
 _publics_header_regex = re.compile(r"^Address\s+Publics by (?:Name|Value)$", flags=re.I)
 
+_segment_contribution_regex = re.compile(
+    r"^\s*(?P<section>[0-9A-F]{4}):(?P<start>[0-9A-F]{4,8})\s+"
+    r"(?P<length>[0-9A-F]+)H?\s+"
+    r"(?=.*\bC=CODE\b)(?=.*\bM=(?P<module>\S+)).*$",
+    flags=re.I,
+)
+
 
 class MapPublic(NamedTuple):
     section: int
     offset: int
     name: str
+
+
+class MapSegmentContribution(NamedTuple):
+    section: int
+    start: int
+    end: int
+    module: str
 
 
 @dataclass
@@ -47,11 +61,13 @@ class DelphiMapParser:
     section_classes: dict[int, str]
     publics: list[MapPublic]
     lines: dict[PureWindowsPath, list[LineValue]]
+    code_contributions: list[MapSegmentContribution]
 
     def __init__(self) -> None:
         self.section_classes = {}
         self.publics = []
         self.lines = {}
+        self.code_contributions = []
         self._mode: str | None = None
         self._current_line_file = PureWindowsPath()
         self._seen_publics: set[tuple[int, int, str]] = set()
@@ -61,6 +77,21 @@ class DelphiMapParser:
             self.section_classes[int(match.group("section"), 16)] = match.group(
                 "class"
             ).upper()
+
+    def _read_segment_contribution_line(self, line: str):
+        if (match := _segment_contribution_regex.match(line)) is None:
+            return
+
+        start = int(match.group("start"), 16)
+        length = int(match.group("length"), 16)
+        self.code_contributions.append(
+            MapSegmentContribution(
+                section=int(match.group("section"), 16),
+                start=start,
+                end=start + length,
+                module=match.group("module"),
+            )
+        )
 
     def _read_public_line(self, line: str):
         if (match := _public_regex.match(line)) is None:
@@ -93,6 +124,7 @@ class DelphiMapParser:
 
     def read_line(self, line: str):
         stripped = line.strip()
+        self._read_segment_contribution_line(line)
 
         if stripped == "Start         Length      Name                   Class" or (
             stripped.startswith("Start")
@@ -129,6 +161,19 @@ class DelphiMapParser:
         for line in text.splitlines():
             self.read_line(line)
 
+    def owner_unit_at(self, section: int, offset: int) -> str | None:
+        owners = {
+            contribution.module
+            for contribution in self.code_contributions
+            if contribution.section == section
+            and contribution.start <= offset < contribution.end
+        }
+
+        if len(owners) == 1:
+            return next(iter(owners))
+
+        return None
+
 
 class DelphiMapAnalysis:
     """CvdumpAnalysis-compatible view of a detailed MAP file."""
@@ -153,6 +198,7 @@ class DelphiMapAnalysis:
                 decorated_name=public.name,
                 friendly_name=public.name,
                 node_type=self._node_type(public),
+                owner_unit=parser.owner_unit_at(public.section, public.offset),
             )
 
         self.lines = parser.lines

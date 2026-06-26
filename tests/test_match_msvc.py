@@ -145,6 +145,29 @@ def test_match_functions(db):
     assert db.count() == 1
 
 
+def test_match_functions_delphi_qualified_name(db):
+    """Delphi unit-qualified names match through the normal function path."""
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            123,
+            name="DCPsha512.Initialization",
+            type=EntityType.FUNCTION,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            555,
+            name="DCPsha512.Initialization",
+            owner_unit="DCPsha512",
+            type=EntityType.FUNCTION,
+        )
+
+    match_functions(db)
+
+    assert db.get(ImageId.ORIG, 123).recomp_addr == 555
+    assert db.get(ImageId.RECOMP, 555).orig_addr == 123
+
+
 def test_match_functions_no_match(db):
     """Skip entities with no match"""
     with db.batch() as batch:

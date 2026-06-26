@@ -5,6 +5,7 @@ from pathlib import PureWindowsPath
 from reccmp.cvdump.cvinfo import CVInfoTypeEnum, CvdumpTypeKey
 from reccmp.delphi import DelphiTd32Analysis, DelphiTd32Parser, has_embedded_td32
 from reccmp.delphi.td32 import (
+    Td32SourceRange,
     decode_td32_call_convention,
     extract_td32_stream,
     normalize_delphi_name,
@@ -192,6 +193,26 @@ def _source_subsection(names: dict[str, int]) -> bytes:
     return bytes(result)
 
 
+def _td32_stream(subsections: list[tuple[int, int, bytes]]) -> bytes:
+    stream = bytearray(b"FB09" + b"\0\0\0\0")
+    entries = []
+    for subsection_type, module_index, payload in subsections:
+        _align4(stream)
+        offset = len(stream)
+        stream += payload
+        entries.append((subsection_type, module_index, offset, len(payload)))
+
+    _align4(stream)
+    directory_offset = len(stream)
+    stream[4:8] = struct.pack("<I", directory_offset)
+    stream += struct.pack("<HHIII", 16, 12, len(entries), 0, 0)
+    for entry in entries:
+        stream += struct.pack("<HHII", *entry)
+
+    stream += b"FB09" + struct.pack("<I", len(stream) + 8)
+    return bytes(stream)
+
+
 def build_td32_stream() -> bytes:
     names_list = [
         "C:\\src\\Unit1.pas",
@@ -232,23 +253,73 @@ def build_td32_stream() -> bytes:
         (0x0127, 1, _source_subsection(names)),
     ]
 
-    stream = bytearray(b"FB09" + b"\0\0\0\0")
-    entries = []
-    for subsection_type, module_index, payload in subsections:
-        _align4(stream)
-        offset = len(stream)
-        stream += payload
-        entries.append((subsection_type, module_index, offset, len(payload)))
+    return _td32_stream(subsections)
 
-    _align4(stream)
-    directory_offset = len(stream)
-    stream[4:8] = struct.pack("<I", directory_offset)
-    stream += struct.pack("<HHIII", 16, 12, len(entries), 0, 0)
-    for entry in entries:
-        stream += struct.pack("<HHII", *entry)
 
-    stream += b"FB09" + struct.pack("<I", len(stream) + 8)
-    return bytes(stream)
+def _lifecycle_symbols_subsection(names: dict[str, int]) -> bytes:
+    result = bytearray(struct.pack("<I", 0))
+
+    for offset, name_key in ((0x10, "initialization"), (0x20, "Finalization")):
+        proc_payload = (
+            struct.pack("<III", 0, 0, 0)
+            + struct.pack("<III", 0x10, 0, 0x10)
+            + struct.pack(
+                "<IHHII",
+                offset,
+                1,
+                0,
+                CVInfoTypeEnum.T_NOTYPE,
+                names[name_key],
+            )
+            + struct.pack("<I", 0)
+        )
+        result += _symbol_record(0x0205, proc_payload)
+        result += _symbol_record(0x0006, b"")
+
+    return bytes(result)
+
+
+def _lifecycle_source_subsection(names: dict[str, int]) -> bytes:
+    file_offset = 20
+    line_offset = 40
+    result = bytearray(
+        struct.pack("<HHI", 1, 1, file_offset)
+        + struct.pack("<II", 0x10, 0x30)
+        + struct.pack("<H", 1)
+        + b"\0\0"
+    )
+    assert len(result) == file_offset
+    result += (
+        struct.pack("<HII", 1, names["DCPsha512.pas"], line_offset)
+        + struct.pack("<II", 0x10, 0x30)
+        + b"\0\0"
+    )
+    assert len(result) == line_offset
+    result += (
+        struct.pack("<HH", 1, 2)
+        + struct.pack("<II", 0x10, 0x20)
+        + struct.pack("<HH", 401, 419)
+    )
+    return bytes(result)
+
+
+def build_lifecycle_td32_stream() -> bytes:
+    names_list = [
+        "C:\\src\\DCPsha512.pas",
+        "initialization",
+        "Finalization",
+    ]
+    names = {
+        "DCPsha512.pas": 1,
+        "initialization": 2,
+        "Finalization": 3,
+    }
+    subsections = [
+        (0x0130, 0, _names_subsection(names_list)),
+        (0x0125, 1, _lifecycle_symbols_subsection(names)),
+        (0x0127, 1, _lifecycle_source_subsection(names)),
+    ]
+    return _td32_stream(subsections)
 
 
 def test_extract_td32_stream_from_appended_data():
@@ -263,6 +334,9 @@ def test_delphi_td32_parser_reads_symbols_lines_and_types():
     assert parser.lines[PureWindowsPath("C:\\src\\Unit1.pas")] == [
         (12, 1, 0x10),
         (14, 1, 0x20),
+    ]
+    assert parser.source_ranges == [
+        Td32SourceRange(section=1, start=0x10, end=0x40, owner_unit="Unit1")
     ]
     assert [symbol.name for symbol in parser.symbols] == ["Unit1.TWidget.Click"]
     assert parser.symbols[0].symbols[0].location == "[FFFFFFFC]"
@@ -354,6 +428,7 @@ def test_delphi_td32_analysis_creates_reccmp_nodes():
     ]
     assert len(functions) == 1
     assert functions[0].friendly_name == "Unit1.TWidget.Click"
+    assert functions[0].owner_unit == "Unit1"
     assert functions[0].confirmed_size == 0x30
     assert functions[0].symbol_entry is not None
     assert functions[0].symbol_entry.symbols[0].name == "LocalValue"
@@ -366,6 +441,27 @@ def test_delphi_td32_analysis_creates_reccmp_nodes():
     vtables = [node for node in analysis.nodes if node.node_type == EntityType.VTABLE]
     assert len(vtables) == 1
     assert vtables[0].friendly_name == "Unit1.TWidget"
+
+
+def test_delphi_td32_analysis_qualifies_unit_lifecycle_names():
+    analysis = DelphiTd32Analysis.from_bytes(build_lifecycle_td32_stream())
+
+    functions = [
+        node for node in analysis.nodes if node.node_type == EntityType.FUNCTION
+    ]
+
+    assert [function.friendly_name for function in functions] == [
+        "DCPsha512.Initialization",
+        "DCPsha512.Finalization",
+    ]
+    assert [function.owner_unit for function in functions] == [
+        "DCPsha512",
+        "DCPsha512",
+    ]
+    assert [function.symbol_entry.name for function in functions] == [
+        "initialization",
+        "Finalization",
+    ]
 
 
 def test_normalize_delphi_name():

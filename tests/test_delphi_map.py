@@ -1,12 +1,16 @@
 from pathlib import PureWindowsPath
 
 from reccmp.delphi import DelphiMapAnalysis, DelphiMapParser
+from reccmp.delphi.mapfile import MapSegmentContribution
 from reccmp.types import EntityType
 
 MAP_TEXT = """\
  Start         Length      Name                   Class
  0001:00401000 00000100H .text                   CODE
  0002:00423000 00000020H .data                   DATA
+
+Detailed map of segments
+ 0001:00000010 00000040 C=CODE     S=.text    G=(none)   M=Unit1 ACBP=A9
 
  Address Publics by Value
 
@@ -30,6 +34,10 @@ def test_delphi_map_parser_reads_publics_and_lines():
         "Unit1.Helper",
         "Unit1.GlobalValue",
     ]
+    assert parser.code_contributions == [
+        MapSegmentContribution(section=1, start=0x10, end=0x50, module="Unit1")
+    ]
+    assert parser.owner_unit_at(1, 0x40) == "Unit1"
     assert parser.lines[PureWindowsPath("C:\\src\\Unit1.pas")][0].line_number == 12
     assert parser.lines[PureWindowsPath("C:\\src\\Unit1.pas")][0].section == 1
     assert parser.lines[PureWindowsPath("C:\\src\\Unit1.pas")][0].offset == 0x10
@@ -40,6 +48,7 @@ def test_delphi_map_analysis_creates_reccmp_nodes():
 
     assert len(analysis.nodes) == 3
     assert analysis.nodes[0].friendly_name == "Unit1.TForm1.ButtonClick"
+    assert analysis.nodes[0].owner_unit == "Unit1"
     assert analysis.nodes[0].node_type == EntityType.FUNCTION
     assert analysis.nodes[0].estimated_size == 0x30
     assert analysis.nodes[2].friendly_name == "Unit1.GlobalValue"

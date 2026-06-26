@@ -75,6 +75,7 @@ class CvdumpNode:
     symbol_entry: SymbolsEntry | None = None
     # Preliminary - only used for non-static variables at the moment
     data_type: TypeInfo | None = None
+    owner_unit: str | None = None
 
     @classmethod
     def from_node_key(cls, key: NodeKey):

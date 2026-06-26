@@ -10,6 +10,7 @@ same structures populated by the cvdump/PDB path.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import logging
 from pathlib import Path, PureWindowsPath
@@ -44,6 +45,7 @@ from reccmp.formats.exceptions import (
 )
 from reccmp.formats.pe import DebugDirectoryEntryHeader, PEDataDirectoryItemType
 from reccmp.types import EntityType
+from .mapfile import DelphiMapAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,13 @@ class Td32Vtable(NamedTuple):
     offset: int
     root_type: CvdumpTypeKey
     path_type: CvdumpTypeKey
+
+
+class Td32SourceRange(NamedTuple):
+    section: int
+    start: int
+    end: int
+    owner_unit: str
 
 
 @dataclass(frozen=True)
@@ -407,6 +416,23 @@ def delphi_vmt_class_name(name: str | None) -> str | None:
     return None
 
 
+def qualify_delphi_function_name(owner_unit: str, name: str | None) -> str | None:
+    """Return a Delphi function name qualified by its source unit."""
+
+    if name is None or not owner_unit:
+        return name
+
+    if name.lower().startswith(f"{owner_unit.lower()}."):
+        return name
+
+    if name.lower() == "initialization":
+        name = "Initialization"
+    elif name.lower() == "finalization":
+        name = "Finalization"
+
+    return f"{owner_unit}.{name}"
+
+
 class DelphiTd32Parser:
     """Parse enough TD32 data to feed reccmp's existing PDB workflows."""
 
@@ -420,6 +446,7 @@ class DelphiTd32Parser:
         self.symbols: list[SymbolsEntry] = []
         self.types = CvdumpTypesParser()
         self.vtables: list[Td32Vtable] = []
+        self.source_ranges: list[Td32SourceRange] = []
         self.unhandled_subsections: set[int] = set()
         self.unhandled_symbols: set[int] = set()
         self.unhandled_types: set[int] = set()
@@ -1151,18 +1178,57 @@ class DelphiTd32Parser:
         segment_count = reader.u16()
         file_offsets = [reader.u32() for _ in range(file_count)]
 
-        # Module-level segment ranges and segment indexes are useful for lookup
-        # scanners, but each source-file line table carries the segment index we
-        # need for reccmp line matching.
-        reader.skip(segment_count * 8)
-        reader.skip(segment_count * 2)
+        segment_ranges = [
+            (reader.u32(), reader.u32()) for _ in range(segment_count)
+        ]
+        segment_indexes = [reader.u16() for _ in range(segment_count)]
         if segment_count % 2:
             reader.skip(2)
+
+        owner_unit = self._source_module_owner_unit(data, file_offsets)
+        if owner_unit is not None:
+            self.source_ranges.extend(
+                Td32SourceRange(
+                    section=section,
+                    start=start,
+                    end=end,
+                    owner_unit=owner_unit,
+                )
+                for (start, end), section in zip(segment_ranges, segment_indexes)
+                if start < end
+            )
 
         for file_offset in file_offsets:
             if file_offset >= len(data):
                 continue
             self._read_source_file(data, file_offset)
+
+    def _source_module_owner_unit(
+        self, data: bytes, file_offsets: list[int]
+    ) -> str | None:
+        filenames: list[PureWindowsPath] = []
+
+        for file_offset in file_offsets:
+            if file_offset >= len(data):
+                continue
+
+            reader = BinaryReader(data, file_offset)
+            if reader.remaining() < 6:
+                continue
+
+            reader.u16()  # segment count
+            filename = self.name(reader.u32())
+            if filename is not None:
+                filenames.append(PureWindowsPath(filename))
+
+        for filename in filenames:
+            if filename.suffix.lower() == ".pas":
+                return filename.stem
+
+        if filenames:
+            return filenames[0].stem
+
+        return None
 
     def _read_source_file(self, data: bytes, file_offset: int):
         reader = BinaryReader(data, file_offset)
@@ -1269,9 +1335,16 @@ class DelphiTd32Parser:
 class DelphiTd32Analysis(CvdumpAnalysis):
     """CvdumpAnalysis-compatible view of embedded Delphi TD32 debug info."""
 
-    def __init__(self, parser: DelphiTd32Parser, image: PEImage | None = None):
+    def __init__(
+        self,
+        parser: DelphiTd32Parser,
+        image: PEImage | None = None,
+        map_analysis: DelphiMapAnalysis | None = None,
+    ):
         self._image = image
+        self._map_analysis = map_analysis
         super().__init__(parser)  # type: ignore[arg-type]
+        self._apply_owner_units()
         self._apply_delphi_vtables()
 
     @classmethod
@@ -1289,8 +1362,13 @@ class DelphiTd32Analysis(CvdumpAnalysis):
         except (OSError, ValueError, struct.error):
             pass
 
+        map_analysis = cls._load_sibling_map(path)
         try:
-            return cls(DelphiTd32Parser.from_bytes(data), image=image)
+            return cls(
+                DelphiTd32Parser.from_bytes(data),
+                image=image,
+                map_analysis=map_analysis,
+            )
         except DelphiTd32Error:
             if not isinstance(image, PEImage):
                 raise
@@ -1298,6 +1376,7 @@ class DelphiTd32Analysis(CvdumpAnalysis):
             return cls(
                 DelphiTd32Parser.from_bytes(extract_td32_stream_from_pe(image)),
                 image=image,
+                map_analysis=map_analysis,
             )
 
     @classmethod
@@ -1306,6 +1385,83 @@ class DelphiTd32Analysis(CvdumpAnalysis):
             DelphiTd32Parser.from_bytes(extract_td32_stream_from_pe(image)),
             image=image,
         )
+
+    @staticmethod
+    def _load_sibling_map(path: Path) -> DelphiMapAnalysis | None:
+        map_path = path.with_suffix(".map")
+        if not map_path.exists():
+            return None
+
+        try:
+            return DelphiMapAnalysis.from_file(map_path)
+        except (OSError, UnicodeDecodeError, ValueError):
+            logger.debug("Failed to read sibling Delphi MAP file: %s", map_path)
+            return None
+
+    def _apply_owner_units(self):
+        parser = cast(DelphiTd32Parser, self.parser)
+
+        for node in self.nodes:
+            if node.node_type != EntityType.FUNCTION:
+                continue
+
+            owner_unit = (
+                self._owner_from_source_ranges(parser, node)
+                or self._owner_from_lines(node)
+                or self._owner_from_map(node)
+            )
+            if owner_unit is None:
+                continue
+
+            node.owner_unit = owner_unit
+            node.friendly_name = qualify_delphi_function_name(owner_unit, node.name())
+
+    @staticmethod
+    def _owner_from_source_ranges(
+        parser: DelphiTd32Parser, node: CvdumpNode
+    ) -> str | None:
+        owners = {
+            source_range.owner_unit
+            for source_range in parser.source_ranges
+            if source_range.section == node.section
+            and source_range.start <= node.offset < source_range.end
+        }
+
+        if len(owners) == 1:
+            return next(iter(owners))
+
+        return None
+
+    def _owner_from_lines(self, node: CvdumpNode) -> str | None:
+        node_size = node.size() or 1
+        start = node.offset
+        end = start + node_size
+        owners: Counter[str] = Counter()
+
+        for filename, values in self.lines.items():
+            owner_unit = filename.stem
+            for value in values:
+                if (
+                    value.section == node.section
+                    and start <= value.offset < end
+                ):
+                    owners[owner_unit] += 1
+
+        if len(owners) == 1:
+            return next(iter(owners))
+
+        if len(owners) > 1:
+            most_common = owners.most_common(2)
+            if most_common[0][1] > most_common[1][1]:
+                return most_common[0][0]
+
+        return None
+
+    def _owner_from_map(self, node: CvdumpNode) -> str | None:
+        if self._map_analysis is None:
+            return None
+
+        return self._map_analysis.parser.owner_unit_at(node.section, node.offset)
 
     def _apply_delphi_vtables(self):
         parser = cast(DelphiTd32Parser, self.parser)
