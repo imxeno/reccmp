@@ -696,42 +696,10 @@ class DelphiTd32Parser:
                 }
 
             if leaf == TYPE_LF_PROCEDURE:
-                return_type = self._read_type_key(reader)
-                call_type = self._read_call_type(reader.u8())
-                reader.u8()  # reserved
-                num_params = reader.u16()
-                arg_list_type = self._read_type_key(reader)
-                return {
-                    "type": "LF_PROCEDURE",
-                    "return_type": return_type,
-                    "call_type": call_type.name,
-                    "call_type_info": call_type.as_cvdump(),
-                    "func_attr": "",
-                    "num_params": num_params,
-                    "arg_list_type": arg_list_type,
-                }
+                return self._read_procedure_type(reader)
 
             if leaf == TYPE_LF_MFUNCTION:
-                return_type = self._read_type_key(reader)
-                class_type = self._read_type_key(reader)
-                this_type = self._read_type_key(reader)
-                call_type = self._read_call_type(reader.u8())
-                reader.u8()  # reserved
-                num_params = reader.u16()
-                arg_list_type = self._read_type_key(reader)
-                this_adjust = reader.i32()
-                return {
-                    "type": "LF_MFUNCTION",
-                    "return_type": return_type,
-                    "class_type": class_type,
-                    "this_type": this_type,
-                    "call_type": call_type.name,
-                    "call_type_info": call_type.as_cvdump(),
-                    "func_attr": "",
-                    "num_params": num_params,
-                    "arg_list_type": arg_list_type,
-                    "this_adjust": this_adjust,
-                }
+                return self._read_member_function_type(reader)
 
             if leaf == TYPE_LF_VTSHAPE:
                 reader.offset = reader.end
@@ -806,6 +774,44 @@ class DelphiTd32Parser:
 
         self._log_unhandled_type(leaf)
         return None
+
+    def _read_procedure_type(self, reader: BinaryReader) -> dict:
+        return_type = self._read_type_key(reader)
+        call_type = self._read_call_type(reader.u8())
+        reader.u8()  # reserved
+        num_params = reader.u16()
+        arg_list_type = self._read_type_key(reader)
+        return {
+            "type": "LF_PROCEDURE",
+            "return_type": return_type,
+            "call_type": call_type.name,
+            "call_type_info": call_type.as_cvdump(),
+            "func_attr": "",
+            "num_params": num_params,
+            "arg_list_type": arg_list_type,
+        }
+
+    def _read_member_function_type(self, reader: BinaryReader) -> dict:
+        return_type = self._read_type_key(reader)
+        class_type = self._read_type_key(reader)
+        this_type = self._read_type_key(reader)
+        call_type = self._read_call_type(reader.u8())
+        reader.u8()  # reserved
+        num_params = reader.u16()
+        arg_list_type = self._read_type_key(reader)
+        this_adjust = reader.i32()
+        return {
+            "type": "LF_MFUNCTION",
+            "return_type": return_type,
+            "class_type": class_type,
+            "this_type": this_type,
+            "call_type": call_type.name,
+            "call_type_info": call_type.as_cvdump(),
+            "func_attr": "",
+            "num_params": num_params,
+            "arg_list_type": arg_list_type,
+            "this_adjust": this_adjust,
+        }
 
     def _read_class_or_struct_type(self, reader: BinaryReader, leaf: int) -> dict:
         reader.u16()  # member count
@@ -1178,9 +1184,7 @@ class DelphiTd32Parser:
         segment_count = reader.u16()
         file_offsets = [reader.u32() for _ in range(file_count)]
 
-        segment_ranges = [
-            (reader.u32(), reader.u32()) for _ in range(segment_count)
-        ]
+        segment_ranges = [(reader.u32(), reader.u32()) for _ in range(segment_count)]
         segment_indexes = [reader.u16() for _ in range(segment_count)]
         if segment_count % 2:
             reader.skip(2)
@@ -1217,9 +1221,9 @@ class DelphiTd32Parser:
                 continue
 
             reader.u16()  # segment count
-            filename = self.name(reader.u32())
-            if filename is not None:
-                filenames.append(PureWindowsPath(filename))
+            filename_text = self.name(reader.u32())
+            if filename_text is not None:
+                filenames.append(PureWindowsPath(filename_text))
 
         for filename in filenames:
             if filename.suffix.lower() == ".pas":
@@ -1441,10 +1445,7 @@ class DelphiTd32Analysis(CvdumpAnalysis):
         for filename, values in self.lines.items():
             owner_unit = filename.stem
             for value in values:
-                if (
-                    value.section == node.section
-                    and start <= value.offset < end
-                ):
+                if value.section == node.section and start <= value.offset < end:
                     owners[owner_unit] += 1
 
         if len(owners) == 1:

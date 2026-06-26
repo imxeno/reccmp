@@ -944,8 +944,12 @@ def test_match_imports_duplicate_names_pair_by_address_order_without_collisions(
     with caplog.at_level(logging.WARNING):
         match_imports(db)
 
-    assert db.get(ImageId.ORIG, 100).recomp_addr == 500
-    assert db.get(ImageId.ORIG, 200).recomp_addr == 600
+    first_import = db.get(ImageId.ORIG, 100)
+    second_import = db.get(ImageId.ORIG, 200)
+    assert first_import is not None
+    assert second_import is not None
+    assert first_import.recomp_addr == 500
+    assert second_import.recomp_addr == 600
     assert "collides with previous staged match" not in caplog.text
 
 
@@ -958,8 +962,12 @@ def test_match_imports_duplicate_names_match_minimum_count(db: EntityDb):
 
     match_imports(db)
 
-    assert db.get(ImageId.ORIG, 100).recomp_addr == 500
-    assert db.get(ImageId.ORIG, 200).recomp_addr is None
+    first_import = db.get(ImageId.ORIG, 100)
+    second_import = db.get(ImageId.ORIG, 200)
+    assert first_import is not None
+    assert second_import is not None
+    assert first_import.recomp_addr == 500
+    assert second_import.recomp_addr is None
 
 
 def test_match_imports_duplicate_names_case_insensitive(db: EntityDb):
@@ -972,5 +980,9 @@ def test_match_imports_duplicate_names_case_insensitive(db: EntityDb):
 
     match_imports(db)
 
-    assert db.get(ImageId.ORIG, 100).recomp_addr == 500
-    assert db.get(ImageId.ORIG, 200).recomp_addr == 600
+    first_import = db.get(ImageId.ORIG, 100)
+    second_import = db.get(ImageId.ORIG, 200)
+    assert first_import is not None
+    assert second_import is not None
+    assert first_import.recomp_addr == 500
+    assert second_import.recomp_addr == 600

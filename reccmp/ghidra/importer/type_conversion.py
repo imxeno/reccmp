@@ -4,6 +4,7 @@
 # pyright: reportMissingModuleSource=false
 
 from ghidra.program.model.data import (
+    BooleanDataType,
     BuiltIn,
     LongDataType,
     VoidDataType,
@@ -16,6 +17,7 @@ from ghidra.program.model.data import (
     UnsignedShortDataType,
     UnsignedIntegerDataType,
     UnsignedLongDataType,
+    Float10DataType,
     FloatDataType,
     DoubleDataType,
     WideCharDataType,
@@ -27,7 +29,9 @@ from reccmp.ghidra.importer.exceptions import TypeNotImplementedError
 _scalar_type_map: dict[CvdumpTypeKey, BuiltIn] = {
     CVInfoTypeEnum.T_VOID: VoidDataType(),
     CVInfoTypeEnum.T_HRESULT: LongDataType(),
+    CVInfoTypeEnum.T_BOOL08: BooleanDataType(),
     CVInfoTypeEnum.T_CHAR: CharDataType(),
+    CVInfoTypeEnum.T_PASCHAR: CharDataType(),
     CVInfoTypeEnum.T_SHORT: ShortDataType(),
     CVInfoTypeEnum.T_LONG: LongDataType(),
     CVInfoTypeEnum.T_QUAD: LongLongDataType(),
@@ -37,6 +41,7 @@ _scalar_type_map: dict[CvdumpTypeKey, BuiltIn] = {
     CVInfoTypeEnum.T_UQUAD: UnsignedLongLongDataType(),
     CVInfoTypeEnum.T_REAL32: FloatDataType(),
     CVInfoTypeEnum.T_REAL64: DoubleDataType(),
+    CVInfoTypeEnum.T_REAL80: Float10DataType(),
     CVInfoTypeEnum.T_RCHAR: CharDataType(),
     CVInfoTypeEnum.T_WCHAR: WideCharDataType(),
     CVInfoTypeEnum.T_INT4: IntegerDataType(),

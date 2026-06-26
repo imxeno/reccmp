@@ -484,7 +484,7 @@ def match_ref(
 
 
 def match_imports(db: EntityDb):
-    orig_imports_by_name = defaultdict(deque)
+    orig_imports_by_name: defaultdict[str, deque[int]] = defaultdict(deque)
 
     # n.b. Case insensitive match here to preserve previous behavior.
     # The final entity will use the name from the recomp side.
@@ -513,4 +513,3 @@ def match_imports(db: EntityDb):
                 orig_addr = orig_addrs.popleft()
                 assert isinstance(ent.recomp_addr, int)
                 batch.match(orig_addr, ent.recomp_addr)
-

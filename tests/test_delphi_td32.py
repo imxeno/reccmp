@@ -458,7 +458,12 @@ def test_delphi_td32_analysis_qualifies_unit_lifecycle_names():
         "DCPsha512",
         "DCPsha512",
     ]
-    assert [function.symbol_entry.name for function in functions] == [
+    symbol_entries = []
+    for function in functions:
+        assert function.symbol_entry is not None
+        symbol_entries.append(function.symbol_entry)
+
+    assert [symbol_entry.name for symbol_entry in symbol_entries] == [
         "initialization",
         "Finalization",
     ]
@@ -501,6 +506,7 @@ targets:
 
 
 def test_known_ignored_td32_symbol_types_do_not_log_unhandled(caplog):
+    # pylint: disable=protected-access
     parser = DelphiTd32Parser()
 
     with caplog.at_level(logging.INFO):
@@ -512,6 +518,7 @@ def test_known_ignored_td32_symbol_types_do_not_log_unhandled(caplog):
 
 
 def test_known_ignored_td32_type_leaf_does_not_log_unhandled(caplog):
+    # pylint: disable=protected-access
     parser = DelphiTd32Parser()
 
     with caplog.at_level(logging.INFO):

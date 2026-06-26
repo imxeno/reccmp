@@ -229,4 +229,7 @@ def test_delphi_nested_outer_function_matches_outer_body_line():
     lines.add_line(PureWindowsPath("Unit1.pas"), 11, 0x5100)
     lines.mark_function_starts([0x5000, 0x5100])
 
-    assert lines.find_function(function.filename, function.line_number, function.end_line) == 0x5100
+    assert (
+        lines.find_function(function.filename, function.line_number, function.end_line)
+        == 0x5100
+    )

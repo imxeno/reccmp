@@ -56,7 +56,7 @@ _CVINFO_TYPES: tuple[CvInfoType, ...] = (
     CvInfoType(key=CvdumpTypeKey(0x0006),  name="T_FBASICSTR",    fmt="",     size=0,   pointer=None,                   verified=False), # Far BASIC string
     CvInfoType(key=CvdumpTypeKey(0x0007),  name="T_NOTTRANS",     fmt="",     size=0,   pointer=None,                   verified=False), # type not translated by cvpack
     CvInfoType(key=CvdumpTypeKey(0x0060),  name="T_BIT",          fmt="",     size=0,   pointer=None,                   verified=False), # bit
-    CvInfoType(key=CvdumpTypeKey(0x0061),  name="T_PASCHAR",      fmt="",     size=0,   pointer=None,                   verified=True),  # Pascal CHAR
+    CvInfoType(key=CvdumpTypeKey(0x0061),  name="T_PASCHAR",      fmt="c",    size=1,   pointer=None,                   verified=True),  # Pascal CHAR
     CvInfoType(key=CvdumpTypeKey(0x0062),  name="T_BOOL32FF",     fmt="i",    size=4,   pointer=None,                   verified=False), # 32-bit BOOL where true is 0xffffffff
 
     # void types
