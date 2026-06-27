@@ -20,7 +20,7 @@ refers to a function at address `0x100b12c0` in the build target aliased by `LEG
 
 Functions can be annotated by one of the markers below. Each marker contains the address of the function as found in the original binaries. This information is then used to compare the recompiled assembly with the original assembly, resulting in an accuracy score.
 
-Note that functions in a given compilation unit must be ordered by their address in ascending order.
+Note that top-level functions in a given compilation unit must be ordered by their address in ascending order. Delphi/Object Pascal `NESTED` markers are placed inside their enclosing routine and are not part of this top-level ordering check.
 
 Function annotations can have multiple different types, which are explained below.
 
@@ -103,6 +103,29 @@ void NeonCactus7532::VTable0x20(undefined4)
 #### `FUNCTION`
 
 Functions with a reasonably complete implementation which are not templated or synthetic (see below) should be annotated with `FUNCTION`. It is preferable to annotate the function's implementation directly.
+
+#### `NESTED`
+
+Delphi/Object Pascal local routines that the compiler emits as separate TD32 local-procedure symbols can be annotated with `NESTED`. This is useful when a nested helper needs its own focused compare target while the enclosing routine keeps its normal `FUNCTION` marker.
+
+Place the `NESTED` marker inside the enclosing routine, after the enclosing routine declaration and immediately before the local `procedure` or `function` declaration:
+
+```pascal
+// FUNCTION: APP 0x00401234
+procedure TMainForm.LoadData;
+
+  // NESTED: APP 0x004010f0
+  procedure LoadOneRow(Index: Integer);
+  begin
+    // local helper implementation
+  end;
+
+begin
+  LoadOneRow(0);
+end;
+```
+
+`reccmp` records the nested routine as a normal function annotation whose name comes from the local declaration. For Delphi TD32 builds, it can then bind that source range to the compiler-emitted local-procedure symbol and compare it directly.
 
 #### `STUB`
 

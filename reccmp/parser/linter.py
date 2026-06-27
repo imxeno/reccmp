@@ -2,6 +2,7 @@ from pathlib import PurePath
 from typing import Iterator, Sequence
 from .parser import ReccmpParserResult
 from .error import AlertCode, ParserAlert
+from .marker import MarkerType
 from .node import ParserFunction, ParserString
 
 
@@ -60,7 +61,7 @@ def check_function_order(result: ReccmpParserResult) -> list[ParserAlert]:
     for fun in relevant_markers:
         # Skip folded functions altogether.
         # Don't use the address to check the order of any upcoming functions.
-        if fun.is_folded:
+        if fun.is_folded or fun.type == MarkerType.NESTED:
             continue
 
         if fun.module in last_offset and fun.offset < last_offset[fun.module]:

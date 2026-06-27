@@ -1,5 +1,6 @@
 from textwrap import dedent
 
+from reccmp.parser.error import AlertCode
 from reccmp.parser.delphi import DelphiParser
 
 
@@ -165,3 +166,90 @@ def test_delphi_nested_routine_with_inner_blocks_before_outer_body():
     assert len(parser.functions) == 1
     assert parser.functions[0].line_number == 21
     assert parser.functions[0].end_line == 22
+
+
+def test_delphi_nested_marker_emits_local_function():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x1000
+        function Outer: Boolean;
+          // NESTED: TEST 0x2000
+          function Inner: Boolean;
+          begin
+            Result := False;
+          end;
+        begin
+          Result := Inner;
+        end;
+        """))
+
+    assert len(parser.alerts) == 0
+    assert len(parser.functions) == 2
+    functions = {function.offset: function for function in parser.functions}
+
+    assert functions[0x1000].name == "Unit1.Outer"
+    assert functions[0x1000].line_number == 12
+    assert functions[0x1000].end_line == 14
+    assert functions[0x2000].name == "Unit1.Inner"
+    assert functions[0x2000].line_number == 8
+    assert functions[0x2000].end_line == 11
+
+
+def test_delphi_nested_marker_only_emits_marked_local_routine():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x1000
+        function Outer: Boolean;
+          function First: Boolean;
+          begin
+            Result := True;
+          end;
+
+          // NESTED: TEST 0x3000
+          procedure Second;
+          begin
+          end;
+        begin
+          Result := First;
+        end;
+        """))
+
+    assert len(parser.alerts) == 0
+    assert len(parser.functions) == 2
+    functions = {function.offset: function for function in parser.functions}
+
+    assert set(functions) == {0x1000, 0x3000}
+    assert functions[0x3000].name == "Unit1.Second"
+    assert functions[0x3000].line_number == 13
+    assert functions[0x3000].end_line == 15
+
+
+def test_delphi_misplaced_nested_marker_does_not_corrupt_outer_function():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x1000
+        procedure Outer;
+        begin
+          // NESTED: TEST 0x2000
+          DoThing;
+        end;
+        """))
+
+    assert len(parser.alerts) == 1
+    assert parser.alerts[0].code == AlertCode.INCOMPATIBLE_MARKER
+    assert len(parser.functions) == 1
+    assert parser.functions[0].offset == 0x1000
+    assert parser.functions[0].name == "Unit1.Outer"
+    assert parser.functions[0].end_line == 10

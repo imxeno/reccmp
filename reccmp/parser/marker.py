@@ -30,6 +30,7 @@ class MarkerType(Enum):
     STRING = 7
     LIBRARY = 8
     LINE = 9
+    NESTED = 10
 
 
 markerRegex = re.compile(
@@ -87,7 +88,11 @@ class DecompMarker:
             return MarkerCategory.STRING
 
         # TODO: worth another look if we add more types, but this covers it
-        if self.is_regular_function() or self.is_explicit_byname():
+        if (
+            self.is_regular_function()
+            or self.is_nested_function()
+            or self.is_explicit_byname()
+        ):
             return MarkerCategory.FUNCTION
 
         return MarkerCategory.ADDRESS
@@ -103,6 +108,9 @@ class DecompMarker:
         FUNCTION and STUB markers are (currently) the only heterogeneous marker types that
         can be lumped together, although the reasons for doing so are a little vague."""
         return self._type in (MarkerType.FUNCTION, MarkerType.STUB)
+
+    def is_nested_function(self) -> bool:
+        return self._type == MarkerType.NESTED
 
     def is_explicit_byname(self) -> bool:
         return self._type in (

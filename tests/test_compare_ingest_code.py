@@ -302,6 +302,52 @@ def test_load_delphi_code_match_line(db: EntityDb, lines_db: LinesDb, binfile: P
     assert entity.get("type") == EntityType.FUNCTION
 
 
+def test_load_delphi_nested_code_match_line(
+    db: EntityDb, lines_db: LinesDb, binfile: PEImage
+):
+    """Should match a marked Delphi nested routine by its local routine line range."""
+    files = (
+        TextFile(
+            PurePath("Unit1.pas"),
+            dedent("""\
+                unit Unit1;
+
+                implementation
+
+                // FUNCTION: TEST 0x1000
+                function Outer: Boolean;
+                  // NESTED: TEST 0x2000
+                  function Inner: Boolean;
+                  begin
+                    Result := False;
+                  end;
+                begin
+                  Result := Inner;
+                end;
+                """),
+        ),
+    )
+
+    lines_db.add_line(PureWindowsPath("C:\\src\\Unit1.pas"), 9, 0x5000)
+    lines_db.add_line(PureWindowsPath("C:\\src\\Unit1.pas"), 12, 0x5100)
+    lines_db.mark_function_starts([0x5000, 0x5100])
+
+    with db.batch() as batch:
+        batch.set(ImageId.RECOMP, 0x5000)
+        batch.set(ImageId.RECOMP, 0x5100)
+    load_markers(files, lines_db, binfile, "TEST", db)
+
+    nested_entity = db.get(ImageId.ORIG, 0x2000)
+    assert nested_entity is not None
+    assert nested_entity.recomp_addr == 0x5000
+    assert nested_entity.get("type") == EntityType.FUNCTION
+
+    outer_entity = db.get(ImageId.ORIG, 0x1000)
+    assert outer_entity is not None
+    assert outer_entity.recomp_addr == 0x5100
+    assert outer_entity.get("type") == EntityType.FUNCTION
+
+
 def test_load_code_no_match_line(db: EntityDb, lines_db: LinesDb, binfile: PEImage):
     """Don't match the function if the line number does not match."""
     files = (

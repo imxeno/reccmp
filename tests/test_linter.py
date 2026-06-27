@@ -1,5 +1,6 @@
 from pathlib import PurePath
 from reccmp.parser import DecompParser, ReccmpParserResult
+from reccmp.parser.delphi import DelphiParser
 from reccmp.parser.error import AlertCode
 from reccmp.parser.linter import (
     check_byname_allowed,
@@ -14,6 +15,14 @@ def create_parser_result(code: str, path: PurePath) -> ReccmpParserResult:
     This converts the text/path into results to try to minimize changes to the existing tests.
     """
     parser = DecompParser()
+    parser.reset_and_set_filename(path)
+    parser.read(code)
+    parser.finish()
+    return parser.to_result()
+
+
+def create_delphi_parser_result(code: str, path: PurePath) -> ReccmpParserResult:
+    parser = DelphiParser()
     parser.reset_and_set_filename(path)
     parser.read(code)
     parser.finish()
@@ -205,6 +214,27 @@ def test_ignore_folded_order():
     """
 
     result = create_parser_result(folded_lines, PurePath("test.cpp"))
+    assert not check_function_order(result)
+
+
+def test_ignore_nested_order():
+    """Nested Delphi functions can appear inside an outer function with a lower address."""
+    code = """\
+unit Unit1;
+
+implementation
+
+// FUNCTION: TEST 0x3000
+procedure Outer;
+  // NESTED: TEST 0x2000
+  procedure Inner;
+  begin
+  end;
+begin
+end;
+"""
+
+    result = create_delphi_parser_result(code, PurePath("Unit1.pas"))
     assert not check_function_order(result)
 
 

@@ -172,11 +172,14 @@ class DelphiParser:
         self.aliases = aliases or {}
 
         self.fun_markers = MarkerDict()
+        self.nested_fun_markers = MarkerDict()
         self.var_markers = MarkerDict()
         self.tbl_markers = MarkerDict()
 
         self.function_start = 0
         self.function_sig = ""
+        self.nested_function_start = 0
+        self.nested_function_sig = ""
         self.function_body_depth = 0
         self.unit_name: str | None = None
         self._resume_state_after_variable: ReaderState | None = None
@@ -184,6 +187,7 @@ class DelphiParser:
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
         self._nested_routine_seen = False
+        self._nested_function_active = False
 
     def reset_and_set_filename(self, filename: PurePath):
         self._symbols = []
@@ -194,17 +198,21 @@ class DelphiParser:
         self.filename = filename
 
         self.fun_markers.empty()
+        self.nested_fun_markers.empty()
         self.var_markers.empty()
         self.tbl_markers.empty()
 
         self.function_start = 0
         self.function_sig = ""
+        self.nested_function_start = 0
+        self.nested_function_sig = ""
         self.function_body_depth = 0
         self.unit_name = None
         self._resume_state_after_variable = None
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
         self._nested_routine_seen = False
+        self._nested_function_active = False
 
     @property
     def functions(self) -> list[ParserFunction]:
@@ -230,6 +238,7 @@ class DelphiParser:
     def _recover(self):
         self.state = ReaderState.SEARCH
         self.fun_markers.empty()
+        self.nested_fun_markers.empty()
         self.var_markers.empty()
         self.tbl_markers.empty()
         self.function_body_depth = 0
@@ -237,6 +246,7 @@ class DelphiParser:
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
         self._nested_routine_seen = False
+        self._nested_function_active = False
 
     def _syntax_warning(self, code: AlertCode):
         self.alerts.append(
@@ -266,6 +276,10 @@ class DelphiParser:
             self._syntax_warning(AlertCode.DUPLICATE_MODULE)
         self.state = ReaderState.WANT_SIG
 
+    def _nested_function_marker(self, marker: DecompMarker):
+        if self.nested_fun_markers.insert(marker):
+            self._syntax_warning(AlertCode.DUPLICATE_MODULE)
+
     def _nameref_marker(self, marker: DecompMarker):
         if self.fun_markers.insert(marker):
             self._syntax_warning(AlertCode.DUPLICATE_MODULE)
@@ -277,10 +291,15 @@ class DelphiParser:
         else:
             self.state = ReaderState.IN_LIBRARY
 
-    def _function_done(self, lookup_by_name: bool = False, unexpected: bool = False):
-        end_line = self.line_number - 1 if unexpected else self.line_number
-
-        for marker in self.fun_markers.iter():
+    def _append_function_symbols(
+        self,
+        markers: MarkerDict,
+        line_number: int,
+        name: str,
+        end_line: int,
+        lookup_by_name: bool = False,
+    ):
+        for marker in markers.iter():
             name_is_symbol = (
                 marker.extra is not None and marker.extra.lower() == "symbol"
             )
@@ -293,10 +312,10 @@ class DelphiParser:
             self._symbols.append(
                 ParserFunction(
                     type=marker.type,
-                    line_number=self.function_start,
+                    line_number=line_number,
                     module=marker.module,
                     offset=marker.offset,
-                    name=self.function_sig,
+                    name=name,
                     filename=self.filename,
                     lookup_by_name=lookup_by_name,
                     name_is_symbol=name_is_symbol,
@@ -305,12 +324,35 @@ class DelphiParser:
                 )
             )
 
+    def _function_done(self, lookup_by_name: bool = False, unexpected: bool = False):
+        end_line = self.line_number - 1 if unexpected else self.line_number
+        self._append_function_symbols(
+            self.fun_markers,
+            self.function_start,
+            self.function_sig,
+            end_line,
+            lookup_by_name,
+        )
+
         self.fun_markers.empty()
         self.function_body_depth = 0
         self.state = ReaderState.SEARCH
         self._nested_routine_pending = False
         self._nested_routine_depth = 0
         self._nested_routine_seen = False
+        self._nested_function_active = False
+
+    def _nested_function_done(self):
+        self._append_function_symbols(
+            self.nested_fun_markers,
+            self.nested_function_start,
+            self.nested_function_sig,
+            self.line_number,
+        )
+        self.nested_fun_markers.empty()
+        self.nested_function_start = 0
+        self.nested_function_sig = ""
+        self._nested_function_active = False
 
     def _vtable_marker(self, marker: DecompMarker):
         if self.tbl_markers.insert(marker):
@@ -410,7 +452,17 @@ class DelphiParser:
             )
         )
 
+    def _has_nested_function_marker(self) -> bool:
+        return next(self.nested_fun_markers.iter(), None) is not None
+
     def _handle_marker(self, marker: DecompMarker):
+        if marker.is_nested_function():
+            if self.state == ReaderState.WANT_CURLY:
+                self._nested_function_marker(marker)
+            else:
+                self._syntax_warning(AlertCode.INCOMPATIBLE_MARKER)
+            return
+
         if self.state == ReaderState.WANT_CURLY:
             self._syntax_error(AlertCode.UNEXPECTED_MARKER)
             return
@@ -499,6 +551,8 @@ class DelphiParser:
         if self._nested_routine_depth > 0:
             self._nested_routine_depth += self._block_delta(line)
             if self._nested_routine_depth <= 0:
+                if self._nested_function_active:
+                    self._nested_function_done()
                 self._nested_routine_pending = False
                 self._nested_routine_depth = 0
             return
@@ -508,13 +562,28 @@ class DelphiParser:
                 self._nested_routine_seen = True
                 self._nested_routine_depth = self._block_delta(line)
                 if self._nested_routine_depth <= 0:
+                    if self._nested_function_active:
+                        self._nested_function_done()
                     self._nested_routine_pending = False
                     self._nested_routine_depth = 0
             return
 
-        if _routine_decl_regex.match(_strip_pascal_comments_and_strings(line)):
+        sanitized = _strip_pascal_comments_and_strings(line)
+        if (match := _routine_decl_regex.match(sanitized)) is not None:
             self._nested_routine_pending = True
+            if self._has_nested_function_marker():
+                self.nested_function_sig = self._qualify_name(match.group("name"))
+                self.nested_function_start = self.line_number
+                if _has_no_implementation(line):
+                    self._syntax_warning(AlertCode.NO_IMPLEMENTATION)
+                    self.nested_fun_markers.empty()
+                else:
+                    self._nested_function_active = True
             return
+
+        if self._has_nested_function_marker() and sanitized.strip():
+            self._syntax_warning(AlertCode.INCOMPATIBLE_MARKER)
+            self.nested_fun_markers.empty()
 
         if self._has_block_start(line):
             if self._nested_routine_seen:

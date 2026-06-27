@@ -34,6 +34,7 @@ Changes vs upstream:
 * Stack locals, parameters, register symbols, and function sizes from TD32.
 * Delphi type records needed for comparison and Ghidra import, including scalars, pointers, arrays, enums, records/classes/objects, fields, and method/function signatures.
 * Delphi VMT support using Pascal annotations plus TD32 type/symbol metadata, comparing the virtual-method pointer region instead of unrelated VMT runtime metadata.
+* Delphi local/nested procedure annotations with `// NESTED: ...` markers.
 * Delphi name normalization for observed Delphi 7 TD32 symbols.
 * Delphi Win32 register calling convention support via a Ghidra `__borland_register` compiler-spec extension.
 
