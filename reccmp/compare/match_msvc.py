@@ -1,4 +1,6 @@
+from bisect import bisect_left
 from collections import defaultdict, deque
+import re
 from reccmp.types import EntityType
 from reccmp.compare.db import EntityDb
 from reccmp.compare.lines import LinesDb
@@ -10,6 +12,10 @@ from reccmp.compare.event import (
 from reccmp.compare.queries import get_referencing_entity_matches
 from reccmp.delphi.td32 import normalize_delphi_name
 from reccmp.types import ImageId
+
+DELPHI_IDR_PLACEHOLDER_RE = re.compile(
+    r"^(?P<owner>.+)\.sub_(?P<address>[0-9a-f]{8})_(?P=address)$", re.IGNORECASE
+)
 
 
 class EntityIndex:
@@ -239,6 +245,94 @@ def match_functions(
                 ent.orig_addr,
                 msg=f"Failed to match function at 0x{ent.orig_addr:x} with name '{name}'",
             )
+
+
+def match_delphi_idr_placeholders(db: EntityDb):
+    """Match address-named IDR functions inside stable Delphi layout spans.
+
+    IDR names such as ``System.sub_004017F4_004017F4`` contain no semantic
+    name to compare with TD32's ``System.FreeSpace``. Infer the correspondence
+    only when matched functions on both sides of the placeholder establish the
+    same address displacement, and the predicted TD32 function has the same
+    owner and exact size. This keeps the fallback deterministic and avoids
+    guessing from a commonly repeated function size.
+    """
+
+    anchors_by_owner: defaultdict[str, list[tuple[int, int]]] = defaultdict(list)
+    for matched_entity in db.get_matches():
+        owner_unit = matched_entity.get("owner_unit")
+        if (
+            matched_entity.get("type") == EntityType.FUNCTION
+            and matched_entity.get("is_delphi")
+            and isinstance(owner_unit, str)
+        ):
+            anchors_by_owner[owner_unit.casefold()].append(
+                (matched_entity.orig_addr, matched_entity.recomp_addr)
+            )
+
+    anchor_orig_addrs: dict[str, list[int]] = {}
+    for owner_key, owner_anchors in anchors_by_owner.items():
+        owner_anchors.sort()
+        anchor_orig_addrs[owner_key] = [orig_addr for orig_addr, _ in owner_anchors]
+
+    recomp_by_addr = {
+        ent.recomp_addr: ent
+        for ent in db.unmatched(ImageId.RECOMP)
+        if ent.get("type") == EntityType.FUNCTION and ent.get("is_delphi")
+    }
+
+    with db.batch() as batch:
+        for ent in db.unmatched(ImageId.ORIG):
+            if ent.get("type") != EntityType.FUNCTION:
+                continue
+
+            name = ent.get("name")
+            if not isinstance(name, str):
+                continue
+
+            placeholder = DELPHI_IDR_PLACEHOLDER_RE.fullmatch(name)
+            if placeholder is None:
+                continue
+
+            assert ent.orig_addr is not None
+            if int(placeholder.group("address"), 16) != ent.orig_addr:
+                continue
+
+            owner_key = placeholder.group("owner").casefold()
+            anchors = anchors_by_owner.get(owner_key)
+            orig_addrs = anchor_orig_addrs.get(owner_key)
+            if not anchors or not orig_addrs:
+                continue
+
+            insertion_index = bisect_left(orig_addrs, ent.orig_addr)
+            if insertion_index == 0 or insertion_index == len(anchors):
+                continue
+
+            previous_orig, previous_recomp = anchors[insertion_index - 1]
+            next_orig, next_recomp = anchors[insertion_index]
+            previous_displacement = previous_recomp - previous_orig
+            next_displacement = next_recomp - next_orig
+            if previous_displacement != next_displacement:
+                continue
+
+            recomp_addr = ent.orig_addr + previous_displacement
+            candidate = recomp_by_addr.get(recomp_addr)
+            if candidate is None:
+                continue
+
+            candidate_owner = candidate.get("owner_unit")
+            if (
+                not isinstance(candidate_owner, str)
+                or candidate_owner.casefold() != owner_key
+            ):
+                continue
+
+            orig_size = ent.size(ImageId.ORIG)
+            recomp_size = candidate.size(ImageId.RECOMP)
+            if orig_size is None or orig_size <= 0 or orig_size != recomp_size:
+                continue
+
+            batch.match(ent.orig_addr, recomp_addr)
 
 
 def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop):

@@ -25,6 +25,7 @@ from .match_msvc import (
     match_lines,
     match_symbols,
     match_functions,
+    match_delphi_idr_placeholders,
     match_vtables,
     match_static_variables,
     match_variables,
@@ -161,6 +162,7 @@ class Compare:
         # Match using PDB and annotation data
         match_symbols(self._db, self.report, truncate=True)
         match_functions(self._db, self.report, truncate=True)
+        match_delphi_idr_placeholders(self._db)
         match_vtables(self._db, self.report)
         match_static_variables(self._db, self.report)
         match_variables(self._db, self.report)
