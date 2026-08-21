@@ -368,6 +368,42 @@ def test_compare_vtable_match():
     ]
 
 
+def test_compare_vtable_skips_compiler_metadata_prefix():
+    function = b"\xc3\x00\x00\x00"
+    orig_header = b"\x11\x11\x11\x11\x00\x00\x00\x00"
+    recomp_header = b"\x22\x22\x22\x22\x00\x00\x00\x00"
+    function_pointer = b"\x00\x00\x00\x00"
+    orig_bin = RawImage.from_memory(function + orig_header + function_pointer)
+    recomp_bin = RawImage.from_memory(function + recomp_header + function_pointer)
+
+    pdb = Mock(spec=CvdumpAnalysis)
+    compare = Compare(orig_bin, recomp_bin, pdb, "HELLO")
+
+    with get_db(compare).batch() as batch:
+        batch.set(ImageId.RECOMP, 0, type=EntityType.FUNCTION, name="hello", size=1)
+        batch.set(
+            ImageId.RECOMP,
+            4,
+            type=EntityType.VTABLE,
+            name="test",
+            size=12,
+            vtable_prefix_size=8,
+        )
+        batch.match(0, 0)
+        batch.match(4, 4)
+
+    report = to_report(compare)
+    entity = report.entities["0x4"]
+    assert entity is not None
+    assert entity.accuracy == 1.0
+    assert get_udiff(entity) == [
+        (
+            "@@ -vtable0x08,1 +vtable0x08,1 @@",
+            [{"both": [("vtable0x08", "(0x0 / 0x0)  :  hello", "vtable0x08")]}],
+        )
+    ]
+
+
 def test_compare_vtable_diff():
     """Vtable contents always appear in the diff report."""
 

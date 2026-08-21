@@ -34,8 +34,9 @@ def check_vtables(db: EntityDb, orig_bin: PEImage):
 
         # TODO: We might want to fix this at the source (cvdump) instead.
         # Any problem will be logged later when we compare the vtable.
-        vtable_size = 4 * (match.any_size() // 4)
-        orig_table = orig_bin.read(match.orig_addr, vtable_size)
+        vtable_prefix_size = match.get("vtable_prefix_size", 0) or 0
+        vtable_size = 4 * ((match.any_size() - vtable_prefix_size) // 4)
+        orig_table = orig_bin.read(match.orig_addr + vtable_prefix_size, vtable_size)
 
         # Check for a gap (null pointer) in the orig vtable.
         # This may or may not be present, but if it is there, we know the vtable

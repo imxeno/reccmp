@@ -44,6 +44,9 @@ def load_cvdump(
     # Build the list of entries to insert to the DB.
     # In the rare case we have duplicate symbols for an address, ignore them.
     seen_addrs = set()
+    delphi_attributes = (
+        {"is_delphi": True} if isinstance(cvdump_analysis, DelphiTd32Analysis) else {}
+    )
 
     with db.batch() as batch:
         for sym in cvdump_analysis.nodes:
@@ -98,6 +101,7 @@ def load_cvdump(
                     type=sym.node_type,
                     symbol=sym.decorated_name,
                     size=sym.section_contribution,
+                    **delphi_attributes,
                 )
 
             elif sym.node_type == EntityType.FLOAT:
@@ -109,6 +113,7 @@ def load_cvdump(
                     type=sym.node_type,
                     symbol=sym.decorated_name,
                     size=sym.size(),
+                    **delphi_attributes,
                 )
             else:
                 # Non-string entities.
@@ -121,6 +126,8 @@ def load_cvdump(
                         symbol=sym.decorated_name,
                         size=sym.size(),
                         owner_unit=sym.owner_unit,
+                        vtable_prefix_size=sym.vtable_prefix_size,
+                        **delphi_attributes,
                     )
                 else:
                     batch.set(
@@ -130,6 +137,8 @@ def load_cvdump(
                         name=sym.name(),
                         symbol=sym.decorated_name,
                         size=sym.size(),
+                        vtable_prefix_size=sym.vtable_prefix_size,
+                        **delphi_attributes,
                     )
 
                 # Set the cvdump type key so it can be referenced later.

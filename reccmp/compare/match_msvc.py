@@ -39,6 +39,19 @@ class EntityIndex:
 
         return value
 
+    def discard(self, key: str, value: int):
+        values = self._dict.get(key)
+        if values is None:
+            return
+
+        try:
+            values.remove(value)
+        except ValueError:
+            return
+
+        if not values:
+            del self._dict[key]
+
 
 def match_symbols(
     db: EntityDb,
@@ -103,8 +116,10 @@ def match_functions(
 ):
     # addr->symbol map. Used later in error message for non-unique match.
     recomp_symbols: dict[int, str] = {}
+    recomp_names: dict[int, str] = {}
 
     name_index = EntityIndex()
+    delphi_name_index = EntityIndex()
 
     # TODO: We allow a match if entity_type is null.
     # This can be removed if we can more confidently declare a symbol is a function
@@ -124,6 +139,11 @@ def match_functions(
 
         assert ent.recomp_addr is not None
         name_index.add(name, ent.recomp_addr)
+        recomp_names[ent.recomp_addr] = name
+
+        delphi_name = normalize_delphi_name(name)
+        if delphi_name is not None:
+            delphi_name_index.add(delphi_name.casefold(), ent.recomp_addr)
 
         # Get the symbol for the error message later.
         if symbol is not None:
@@ -151,6 +171,11 @@ def match_functions(
 
             if name in name_index:
                 recomp_addr = name_index.pop(name)
+                recomp_delphi_name = normalize_delphi_name(recomp_names[recomp_addr])
+                if recomp_delphi_name is not None:
+                    delphi_name_index.discard(
+                        recomp_delphi_name.casefold(), recomp_addr
+                    )
                 # If match was not unique
                 if name in name_index:
                     non_unique_names.add(name)
@@ -172,12 +197,48 @@ def match_functions(
                     )
 
                 batch.match(ent.orig_addr, recomp_addr)
-            else:
-                report(
-                    ReccmpEvent.NO_MATCH,
-                    ent.orig_addr,
-                    msg=f"Failed to match function at 0x{ent.orig_addr:x} with name '{name}'",
-                )
+                continue
+
+            # Delphi is case-insensitive, and IDR retains decoration that TD32
+            # removes (e.g. System.@ClassDestroy_00404754 versus
+            # System.ClassDestroy). Restrict this fallback to compiler-decorated
+            # names that contain ``@`` so ordinary C/C++ names and IDR's generic
+            # address-suffixed aliases retain their existing match behavior.
+            delphi_name = normalize_delphi_name(name)
+            if delphi_name is not None and delphi_name != name and "@" in name:
+                delphi_key = delphi_name.casefold()
+                if delphi_key in delphi_name_index:
+                    recomp_addr = delphi_name_index.pop(delphi_key)
+                    name_index.discard(recomp_names[recomp_addr], recomp_addr)
+
+                    if delphi_key in delphi_name_index:
+                        matched_symbol = recomp_symbols.get(recomp_addr, "None")
+                        other_symbols = [
+                            recomp_symbols.get(candidate_addr, "None")
+                            for candidate_addr in delphi_name_index.get(delphi_key)
+                        ]
+                        report(
+                            ReccmpEvent.AMBIGUOUS_MATCH,
+                            ent.orig_addr,
+                            msg=(
+                                f"Ambiguous Delphi match 0x{ent.orig_addr:x} "
+                                f"on normalized name '{delphi_name}' to\n"
+                                f"'{matched_symbol}'\n"
+                                "Other candidates:\n"
+                                + ",\n".join(
+                                    f"'{candidate}'" for candidate in other_symbols
+                                )
+                            ),
+                        )
+
+                    batch.match(ent.orig_addr, recomp_addr)
+                    continue
+
+            report(
+                ReccmpEvent.NO_MATCH,
+                ent.orig_addr,
+                msg=f"Failed to match function at 0x{ent.orig_addr:x} with name '{name}'",
+            )
 
 
 def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop):
@@ -200,6 +261,8 @@ def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop
 
     vtable_name_index = EntityIndex()
     delphi_vtable_name_index = EntityIndex()
+    delphi_short_vtable_name_index = EntityIndex()
+    delphi_vtable_aliases: dict[int, tuple[str | None, str]] = {}
 
     for ent in db.unmatched(ImageId.RECOMP):
         name = ent.get("name")
@@ -209,11 +272,20 @@ def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop
         assert ent.recomp_addr is not None
         vtable_name_index.add(name, ent.recomp_addr)
         delphi_name = normalize_delphi_name(name)
-        if delphi_name and "." in delphi_name:
-            delphi_vtable_name_index.add(delphi_name, ent.recomp_addr)
+        if delphi_name and ("." in delphi_name or ent.get("is_delphi")):
             short_name = delphi_name.rsplit(".", 1)[-1]
-            if short_name != delphi_name:
-                delphi_vtable_name_index.add(short_name, ent.recomp_addr)
+            full_key = delphi_name.casefold() if "." in delphi_name else None
+            short_key = short_name.casefold()
+            if full_key is not None:
+                delphi_vtable_name_index.add(full_key, ent.recomp_addr)
+            delphi_short_vtable_name_index.add(short_key, ent.recomp_addr)
+            delphi_vtable_aliases[ent.recomp_addr] = (full_key, short_key)
+
+    def discard_delphi_vtable_aliases(recomp_addr: int):
+        full_key, short_key = delphi_vtable_aliases[recomp_addr]
+        if full_key is not None:
+            delphi_vtable_name_index.discard(full_key, recomp_addr)
+        delphi_short_vtable_name_index.discard(short_key, recomp_addr)
 
     with db.batch() as batch:
         for ent in db.unmatched(ImageId.ORIG):
@@ -245,10 +317,23 @@ def match_vtables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_nop
                 continue
 
             delphi_class_name = normalize_delphi_name(class_name)
-            if delphi_class_name and delphi_class_name in delphi_vtable_name_index:
-                recomp_addr = delphi_vtable_name_index.pop(delphi_class_name)
-                batch.match(ent.orig_addr, recomp_addr)
-                continue
+            if delphi_class_name:
+                full_key = delphi_class_name.casefold()
+                if full_key in delphi_vtable_name_index:
+                    recomp_addr = delphi_vtable_name_index.pop(full_key)
+                    discard_delphi_vtable_aliases(recomp_addr)
+                    batch.match(ent.orig_addr, recomp_addr)
+                    continue
+
+                # Some Delphi 7 TD32 class records expose only ``TWidget``
+                # while source VTABLE markers retain ``Unit1.TWidget``. Match
+                # through the short class name only when it is unique.
+                short_key = delphi_class_name.rsplit(".", 1)[-1].casefold()
+                if delphi_short_vtable_name_index.count(short_key) == 1:
+                    recomp_addr = delphi_short_vtable_name_index.pop(short_key)
+                    discard_delphi_vtable_aliases(recomp_addr)
+                    batch.match(ent.orig_addr, recomp_addr)
+                    continue
 
             report(
                 ReccmpEvent.NO_MATCH,

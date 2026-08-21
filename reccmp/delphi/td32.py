@@ -14,6 +14,7 @@ from collections import Counter
 from dataclasses import dataclass
 import logging
 from pathlib import Path, PureWindowsPath
+import re
 import struct
 from typing import NamedTuple, cast
 
@@ -48,6 +49,18 @@ from reccmp.types import EntityType
 from .mapfile import DelphiMapAnalysis
 
 logger = logging.getLogger(__name__)
+
+
+DELPHI_IDR_ADDRESS_SUFFIX_RE = re.compile(r"_[0-9A-Fa-f]{8}$")
+
+# Delphi 7 stores the compiler-managed VMT metadata immediately before the
+# virtual slots. Source-analysis tools such as IDR label the beginning of this
+# complete block, and generated constructor code loads the class reference from
+# that address. Keep discovered VMT entities on the same address convention so
+# source markers and constructor operands describe the same object.
+DELPHI_VMT_HEADER_SIZE = 0x48
+DELPHI_VMT_CLASS_NAME_OFFSET_FROM_SLOTS = 0x28
+DELPHI_VMT_INSTANCE_SIZE_OFFSET_FROM_SLOTS = 0x24
 
 TD32_SIGNATURES = (b"FB09", b"FB0A")
 
@@ -389,6 +402,12 @@ def normalize_delphi_name(name: str | None) -> str | None:
         parts = [part for part in result.split("@") if part]
         if parts:
             result = ".".join(parts)
+
+    # IDR spells compiler helpers as e.g. ``System.@LStrClr`` and may append
+    # the original address to disambiguate them. TD32 exposes the same helper
+    # as ``System.LStrClr``. Normalize both forms to the source-level name.
+    result = ".".join(part.removeprefix("@") for part in result.split("."))
+    result = DELPHI_IDR_ADDRESS_SUFFIX_RE.sub("", result)
 
     if "$" in result and not result.startswith("$"):
         result = result.split("$", 1)[0]
@@ -1511,9 +1530,19 @@ class DelphiTd32Analysis(CvdumpAnalysis):
             if len(data) < 44:
                 continue
 
-            for offset in range(40, len(data) - 3, 4):
+            for offset in range(
+                DELPHI_VMT_CLASS_NAME_OFFSET_FROM_SLOTS,
+                len(data) - 3,
+                4,
+            ):
                 class_name_ptr = int.from_bytes(
-                    data[offset - 40 : offset - 36], "little"
+                    data[
+                        offset
+                        - DELPHI_VMT_CLASS_NAME_OFFSET_FROM_SLOTS : offset
+                        - DELPHI_VMT_CLASS_NAME_OFFSET_FROM_SLOTS
+                        + 4
+                    ],
+                    "little",
                 )
                 class_name = self._read_pascal_short_string(class_name_ptr)
                 if class_name is None:
@@ -1524,7 +1553,13 @@ class DelphiTd32Analysis(CvdumpAnalysis):
                     continue
 
                 instance_size = int.from_bytes(
-                    data[offset - 36 : offset - 32], "little"
+                    data[
+                        offset
+                        - DELPHI_VMT_INSTANCE_SIZE_OFFSET_FROM_SLOTS : offset
+                        - DELPHI_VMT_INSTANCE_SIZE_OFFSET_FROM_SLOTS
+                        + 4
+                    ],
+                    "little",
                 )
                 full_name = self._matching_delphi_class_name(
                     matching_infos, instance_size
@@ -1532,20 +1567,25 @@ class DelphiTd32Analysis(CvdumpAnalysis):
                 if full_name is None:
                     continue
 
-                vmt_addr = section.virtual_address + offset
-                slot_count = self._count_delphi_vmt_slots(vmt_addr, code_ranges)
+                vmt_slots_addr = section.virtual_address + offset
+                slot_count = self._count_delphi_vmt_slots(vmt_slots_addr, code_ranges)
                 if slot_count == 0:
                     continue
 
-                key = (section_index, offset)
+                header_offset = offset - DELPHI_VMT_HEADER_SIZE
+                if header_offset < 0:
+                    continue
+
+                key = (section_index, header_offset)
                 node = node_by_key.get(key)
                 if node is None:
-                    node = CvdumpNode(section=section_index, offset=offset)
+                    node = CvdumpNode(section=section_index, offset=header_offset)
                     node_by_key[key] = node
 
                 node.node_type = EntityType.VTABLE
                 node.friendly_name = full_name
-                node.confirmed_size = slot_count * 4
+                node.confirmed_size = DELPHI_VMT_HEADER_SIZE + slot_count * 4
+                node.vtable_prefix_size = DELPHI_VMT_HEADER_SIZE
 
     def _delphi_class_infos_by_short_name(
         self, parser: DelphiTd32Parser

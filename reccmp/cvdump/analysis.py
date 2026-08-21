@@ -76,6 +76,10 @@ class CvdumpNode:
     # Preliminary - only used for non-static variables at the moment
     data_type: TypeInfo | None = None
     owner_unit: str | None = None
+    # Number of compiler-managed metadata bytes before the comparable virtual
+    # slots. Delphi source markers can refer to the start of the complete VMT
+    # block because constructors load their class reference from there.
+    vtable_prefix_size: int | None = None
 
     @classmethod
     def from_node_key(cls, key: NodeKey):

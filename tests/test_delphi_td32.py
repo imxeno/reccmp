@@ -1,7 +1,11 @@
 import logging
 import struct
 from pathlib import PureWindowsPath
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
 
+from reccmp.cvdump.analysis import CvdumpNode
 from reccmp.cvdump.cvinfo import CVInfoTypeEnum, CvdumpTypeKey
 from reccmp.delphi import DelphiTd32Analysis, DelphiTd32Parser, has_embedded_td32
 from reccmp.delphi.td32 import (
@@ -13,6 +17,7 @@ from reccmp.delphi.td32 import (
 from reccmp.project.common import RECCMP_BUILD_CONFIG, RECCMP_PROJECT_CONFIG
 from reccmp.project.config import BuildFile
 from reccmp.project.detect import DetectWhat, detect_project
+from reccmp.formats import PEImage
 from reccmp.types import EntityType
 
 
@@ -471,6 +476,49 @@ def test_delphi_td32_analysis_qualifies_unit_lifecycle_names():
 
 def test_normalize_delphi_name():
     assert normalize_delphi_name("@Unit1@TWidget@Click$qqrv") == "Unit1.TWidget.Click"
+    assert normalize_delphi_name("System.@LStrClr") == "System.LStrClr"
+    assert (
+        normalize_delphi_name("system.@BeforeDestruction_0040476C")
+        == "system.BeforeDestruction"
+    )
+
+
+def test_discovered_delphi_vmt_uses_header_address():
+    # pylint: disable=protected-access
+    vmt_slots_offset = 0x70
+    data = bytearray(0x100)
+    data[vmt_slots_offset - 0x28 : vmt_slots_offset - 0x24] = struct.pack("<I", 0x2000)
+    data[vmt_slots_offset - 0x24 : vmt_slots_offset - 0x20] = struct.pack("<I", 16)
+    section = SimpleNamespace(name=".data", view=data, virtual_address=0x1000)
+    image = SimpleNamespace(sections=[section], get_code_regions=lambda: [])
+    analysis = object.__new__(DelphiTd32Analysis)
+    analysis._image = cast(PEImage, image)
+    parser = DelphiTd32Parser()
+    nodes: dict[tuple[int, int], CvdumpNode] = {}
+
+    with (
+        patch.object(
+            DelphiTd32Analysis,
+            "_delphi_class_infos_by_short_name",
+            return_value={"twidget": [("Unit1.TWidget", 16)]},
+        ),
+        patch.object(
+            DelphiTd32Analysis,
+            "_read_pascal_short_string",
+            side_effect=lambda addr: "TWidget" if addr == 0x2000 else None,
+        ),
+        patch.object(
+            DelphiTd32Analysis,
+            "_count_delphi_vmt_slots",
+            side_effect=lambda addr, _ranges: 2 if addr == 0x1070 else 0,
+        ),
+    ):
+        analysis._apply_discovered_delphi_vmts(parser, nodes)
+
+    assert list(nodes) == [(1, 0x28)]
+    assert nodes[(1, 0x28)].friendly_name == "Unit1.TWidget"
+    assert nodes[(1, 0x28)].confirmed_size == 0x50
+    assert nodes[(1, 0x28)].vtable_prefix_size == 0x48
 
 
 def test_project_detect_uses_binary_when_it_has_embedded_td32(tmp_path):

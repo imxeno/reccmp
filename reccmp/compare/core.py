@@ -276,7 +276,8 @@ class Compare:
         return compare
 
     def _compare_vtable(self, match: ReccmpMatch) -> EntityCompareResult:
-        vtable_size = match.any_size()
+        vtable_prefix_size = match.get("vtable_prefix_size", 0) or 0
+        vtable_size = match.any_size() - vtable_prefix_size
 
         # The vtable size should always be a multiple of 4 because that
         # is the pointer size. If it is not (for whatever reason)
@@ -287,8 +288,12 @@ class Compare:
             )
             vtable_size = 4 * (vtable_size // 4)
 
-        orig_table = self.orig_bin.read(match.orig_addr, vtable_size)
-        recomp_table = self.recomp_bin.read(match.recomp_addr, vtable_size)
+        orig_table = self.orig_bin.read(
+            match.orig_addr + vtable_prefix_size, vtable_size
+        )
+        recomp_table = self.recomp_bin.read(
+            match.recomp_addr + vtable_prefix_size, vtable_size
+        )
 
         raw_addrs = zip(
             [t for (t,) in struct.iter_unpack("<L", orig_table)],
@@ -335,7 +340,7 @@ class Compare:
                 ratio += 1
 
             n_entries += 1
-            index = f"vtable0x{i*4:02x}"
+            index = f"vtable0x{vtable_prefix_size + i*4:02x}"
             orig_text.append((index, match_text(orig, raw_orig)))
             recomp_text.append((index, match_text(recomp)))
 
