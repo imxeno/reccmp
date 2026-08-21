@@ -33,6 +33,11 @@ from .match_msvc import (
     match_ref,
     match_imports,
 )
+from .match_delphi import (
+    match_delphi_library_layout,
+    match_delphi_library_functions,
+    match_delphi_lifecycle_guards,
+)
 from .db import EntityDb, ReccmpEntity, ReccmpMatch
 from .diff import DiffReport
 from .lines import LinesDb
@@ -162,6 +167,7 @@ class Compare:
         # Match using PDB and annotation data
         match_symbols(self._db, self.report, truncate=True)
         match_functions(self._db, self.report, truncate=True)
+        match_delphi_library_functions(self._db, self.report)
         match_delphi_idr_placeholders(self._db)
         match_vtables(self._db, self.report)
         match_static_variables(self._db, self.report)
@@ -187,6 +193,20 @@ class Compare:
 
         for img_id in (ImageId.ORIG, ImageId.RECOMP):
             set_max_size(self._db, img_id)
+
+        match_delphi_library_layout(
+            self._db,
+            self.orig_bin,
+            self.recomp_bin,
+            self.report,
+        )
+
+        match_delphi_lifecycle_guards(
+            self._db,
+            self.orig_bin,
+            self.recomp_bin,
+            self.report,
+        )
 
         # Creates new offset entities within the footprint of each matched
         # array variable. If the array is larger (bytes) in recomp than in orig,

@@ -597,6 +597,87 @@ def test_match_variables(db):
     assert db.count() == 1
 
 
+def test_match_variables_prefers_exact_name_before_delphi_qualification(db):
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            123,
+            name="Unit1.GlobalValue",
+            type=EntityType.DATA,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            444,
+            name="Unit1.GlobalValue",
+            owner_unit="OtherUnit",
+            type=EntityType.DATA,
+            is_delphi=True,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            555,
+            name="GlobalValue",
+            owner_unit="Unit1",
+            type=EntityType.DATA,
+            is_delphi=True,
+        )
+
+    match_variables(db)
+
+    assert db.is_match(123, 444)
+
+
+def test_match_variables_delphi_qualified_fallback_is_case_insensitive(db):
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            123,
+            name="LBSCommon.GlobalDeferredVertexBuffer",
+            type=EntityType.DATA,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            555,
+            name="globaldeferredvertexbuffer",
+            owner_unit="lbscommon",
+            type=EntityType.DATA,
+            is_delphi=True,
+        )
+
+    match_variables(db)
+
+    match = db.get(ImageId.ORIG, 123)
+    assert match is not None
+    assert match.recomp_addr == 555
+    assert match.get("name") == "globaldeferredvertexbuffer"
+    assert match.get("computed_name") == "LBSCommon.GlobalDeferredVertexBuffer"
+    assert match.best_name() == "LBSCommon.GlobalDeferredVertexBuffer"
+
+
+def test_match_variables_rejects_ambiguous_delphi_qualified_fallback(db, report):
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            123,
+            name="Unit1.GlobalValue",
+            type=EntityType.DATA,
+        )
+        for address in (444, 555):
+            batch.set(
+                ImageId.RECOMP,
+                address,
+                name="GlobalValue",
+                owner_unit="Unit1",
+                type=EntityType.DATA,
+                is_delphi=True,
+            )
+
+    match_variables(db, report)
+
+    assert db.get(ImageId.ORIG, 123).recomp_addr is None
+    report.assert_called_once_with(ReccmpEvent.AMBIGUOUS_MATCH, 123, msg=ANY)
+
+
 def test_match_variables_no_match(db):
     """Skip entities with no match"""
     with db.batch() as batch:

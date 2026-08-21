@@ -461,6 +461,43 @@ def test_compare_complex_raw_empty_struct(db: EntityDb):
     assert c.result == CompareResult.MATCH
 
 
+def test_compare_raw_when_type_size_is_unknown(db: EntityDb):
+    """Use the symbol size when TD32 cannot materialize the type size."""
+    key = CvdumpTypeKey(0x1000)
+    types = MockTypesDb([TypeInfo(key=key, size=None, members=None)])
+    create_matched_variable(db, 0, size=4, data_type=key)
+    orig = RawImage.from_memory(b"\x01\x02\x03\x04")
+    recomp = RawImage.from_memory(b"\x01\x02\x03\x04")
+    comparator = VariableComparator(db, types, orig, recomp)
+
+    result = comparator.compare_variable(get_match(db, 0))
+
+    assert result.result == CompareResult.MATCH
+    assert result.raw_only is True
+
+
+def test_compare_variable_uses_computed_name_without_raw_symbol(
+    db: EntityDb, types: CvdumpTypesParser
+):
+    with db.batch() as batch:
+        batch.set(
+            ImageId.RECOMP,
+            0,
+            computed_name="Unit1.UnitFinalizationGuard",
+            type=EntityType.DATA,
+            size=4,
+        )
+        batch.match(0, 0)
+    orig = RawImage.from_memory(b"\0\0\0\0")
+    recomp = RawImage.from_memory(b"\0\0\0\0")
+    comparator = VariableComparator(db, types, orig, recomp)
+
+    result = comparator.compare_variable(get_match(db, 0))
+
+    assert result.result == CompareResult.MATCH
+    assert result.name == "Unit1.UnitFinalizationGuard"
+
+
 def test_compare_orig_read_error(db: EntityDb, types: CvdumpTypesParser):
     """Trap a read error in the orig binary and report an error."""
     create_matched_variable(db, 0, data_type=CVInfoTypeEnum.T_INT4)

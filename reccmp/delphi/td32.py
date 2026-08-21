@@ -466,6 +466,8 @@ class DelphiTd32Parser:
         self.types = CvdumpTypesParser()
         self.vtables: list[Td32Vtable] = []
         self.source_ranges: list[Td32SourceRange] = []
+        self.module_owner_units: dict[int, str] = {}
+        self.data_owner_units: dict[tuple[int, int], str] = {}
         self.unhandled_subsections: set[int] = set()
         self.unhandled_symbols: set[int] = set()
         self.unhandled_types: set[int] = set()
@@ -473,6 +475,8 @@ class DelphiTd32Parser:
         self._current_function: SymbolsEntry | None = None
         self._block_level = 0
         self._seen_publics: set[tuple[int, int, str]] = set()
+        self._ambiguous_module_owners: set[int] = set()
+        self._ambiguous_data_owners: set[tuple[int, int]] = set()
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DelphiTd32Parser":
@@ -513,18 +517,29 @@ class DelphiTd32Parser:
             if entry.subsection_type == SUBSECTION_TYPE_MODULE:
                 self.modules.append(entry)
 
+        # Source subsections establish the module-index-to-unit relationship used
+        # by module-scoped symbol subsections. Read all of them before symbols in
+        # case the TD32 directory places ALIGN_SYMBOLS first.
+        for entry in entries:
+            if entry.subsection_type == SUBSECTION_TYPE_SOURCE_MODULE:
+                self._read_source_module(
+                    self._subsection(stream, entry), entry.module_index
+                )
+
         for entry in entries:
             subsection = self._subsection(stream, entry)
-            if entry.subsection_type == SUBSECTION_TYPE_SOURCE_MODULE:
-                self._read_source_module(subsection)
-            elif entry.subsection_type == SUBSECTION_TYPE_ALIGN_SYMBOLS:
-                self._read_symbols(subsection, has_signature=True)
+            owner_unit = self.module_owner_units.get(entry.module_index)
+            if entry.subsection_type == SUBSECTION_TYPE_ALIGN_SYMBOLS:
+                self._read_symbols(
+                    subsection, has_signature=True, owner_unit=owner_unit
+                )
             elif entry.subsection_type == SUBSECTION_TYPE_GLOBAL_SYMBOLS:
-                self._read_global_symbols(subsection)
+                self._read_global_symbols(subsection, owner_unit=owner_unit)
             elif entry.subsection_type not in (
                 SUBSECTION_TYPE_NAMES,
                 SUBSECTION_TYPE_GLOBAL_TYPES,
                 SUBSECTION_TYPE_MODULE,
+                SUBSECTION_TYPE_SOURCE_MODULE,
             ):
                 self._log_unhandled_subsection(entry.subsection_type)
 
@@ -967,9 +982,9 @@ class DelphiTd32Parser:
 
         return result
 
-    def _read_global_symbols(self, data: bytes):
+    def _read_global_symbols(self, data: bytes, *, owner_unit: str | None = None):
         if len(data) < 32:
-            self._read_symbols(data, has_signature=False)
+            self._read_symbols(data, has_signature=False, owner_unit=owner_unit)
             return
 
         reader = BinaryReader(data)
@@ -984,9 +999,19 @@ class DelphiTd32Parser:
         reader.u32()  # namespace count
         symbol_start = reader.offset
         symbol_end = min(symbol_start + symbol_size, len(data))
-        self._read_symbols(data[symbol_start:symbol_end], has_signature=False)
+        self._read_symbols(
+            data[symbol_start:symbol_end],
+            has_signature=False,
+            owner_unit=owner_unit,
+        )
 
-    def _read_symbols(self, data: bytes, *, has_signature: bool):
+    def _read_symbols(
+        self,
+        data: bytes,
+        *,
+        has_signature: bool,
+        owner_unit: str | None = None,
+    ):
         offset = 4 if has_signature and len(data) >= 4 else 0
         end = len(data)
         self._current_function = None
@@ -1004,10 +1029,16 @@ class DelphiTd32Parser:
 
             symbol_type = struct.unpack_from("<H", data, record_start)[0]
             payload = data[record_start + 2 : record_end]
-            self._parse_symbol_record(symbol_type, payload)
+            self._parse_symbol_record(symbol_type, payload, owner_unit=owner_unit)
             offset = record_end
 
-    def _parse_symbol_record(self, symbol_type: int, payload: bytes):
+    def _parse_symbol_record(
+        self,
+        symbol_type: int,
+        payload: bytes,
+        *,
+        owner_unit: str | None = None,
+    ):
         reader = BinaryReader(payload)
 
         try:
@@ -1018,7 +1049,7 @@ class DelphiTd32Parser:
             elif symbol_type == SYMBOL_TYPE_REGISTER:
                 self._read_register_symbol(reader)
             elif symbol_type in (SYMBOL_TYPE_LDATA32, SYMBOL_TYPE_GDATA32):
-                self._read_data_symbol(symbol_type, reader)
+                self._read_data_symbol(symbol_type, reader, owner_unit=owner_unit)
             elif symbol_type == SYMBOL_TYPE_PUB32:
                 self._read_public_symbol(reader)
             elif symbol_type in (SYMBOL_TYPE_GPROCREF, SYMBOL_TYPE_GDATAREF):
@@ -1106,7 +1137,13 @@ class DelphiTd32Parser:
             )
         )
 
-    def _read_data_symbol(self, symbol_type: int, reader: BinaryReader):
+    def _read_data_symbol(
+        self,
+        symbol_type: int,
+        reader: BinaryReader,
+        *,
+        owner_unit: str | None = None,
+    ):
         offset = reader.u32()
         section = reader.u16()
         reader.u16()  # flags
@@ -1130,8 +1167,29 @@ class DelphiTd32Parser:
                 is_global=symbol_type == SYMBOL_TYPE_GDATA32,
             )
         )
+        if owner_unit is not None:
+            self._record_data_owner(section, offset, owner_unit)
         if symbol_type == SYMBOL_TYPE_GDATA32:
             self._add_public(section, offset, 0, name)
+
+    def _record_data_owner(self, section: int, offset: int, owner_unit: str):
+        key = (section, offset)
+        if key in self._ambiguous_data_owners:
+            return
+
+        previous_owner = self.data_owner_units.get(key)
+        if previous_owner is None:
+            self.data_owner_units[key] = owner_unit
+        elif previous_owner.casefold() != owner_unit.casefold():
+            self.data_owner_units.pop(key, None)
+            self._ambiguous_data_owners.add(key)
+            logger.warning(
+                "Conflicting TD32 DATA owners for section %d offset 0x%x: %s, %s",
+                section,
+                offset,
+                previous_owner,
+                owner_unit,
+            )
 
     def _read_public_symbol(self, reader: BinaryReader):
         offset = reader.u32()
@@ -1194,7 +1252,7 @@ class DelphiTd32Parser:
             )
         )
 
-    def _read_source_module(self, data: bytes):
+    def _read_source_module(self, data: bytes, module_index: int = 0):
         if len(data) < 4:
             return
 
@@ -1210,6 +1268,7 @@ class DelphiTd32Parser:
 
         owner_unit = self._source_module_owner_unit(data, file_offsets)
         if owner_unit is not None:
+            self._record_module_owner(module_index, owner_unit)
             self.source_ranges.extend(
                 Td32SourceRange(
                     section=section,
@@ -1225,6 +1284,23 @@ class DelphiTd32Parser:
             if file_offset >= len(data):
                 continue
             self._read_source_file(data, file_offset)
+
+    def _record_module_owner(self, module_index: int, owner_unit: str):
+        if module_index <= 0 or module_index in self._ambiguous_module_owners:
+            return
+
+        previous_owner = self.module_owner_units.get(module_index)
+        if previous_owner is None:
+            self.module_owner_units[module_index] = owner_unit
+        elif previous_owner.casefold() != owner_unit.casefold():
+            self.module_owner_units.pop(module_index, None)
+            self._ambiguous_module_owners.add(module_index)
+            logger.warning(
+                "Conflicting TD32 source owners for module %d: %s, %s",
+                module_index,
+                previous_owner,
+                owner_unit,
+            )
 
     def _source_module_owner_unit(
         self, data: bytes, file_offsets: list[int]
@@ -1425,6 +1501,12 @@ class DelphiTd32Analysis(CvdumpAnalysis):
         parser = cast(DelphiTd32Parser, self.parser)
 
         for node in self.nodes:
+            if node.node_type == EntityType.DATA:
+                node.owner_unit = parser.data_owner_units.get(
+                    (node.section, node.offset)
+                )
+                continue
+
             if node.node_type != EntityType.FUNCTION:
                 continue
 

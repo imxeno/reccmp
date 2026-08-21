@@ -166,6 +166,16 @@ def _symbols_subsection(names: dict[str, int]) -> bytes:
     ) + struct.pack("<I", 0)
     result += _symbol_record(0x0202, global_payload)
 
+    anonymous_guard_payload = struct.pack(
+        "<IHHII",
+        0x24,
+        2,
+        0,
+        CVInfoTypeEnum.T_INT4,
+        names["AnonymousGuard"],
+    ) + struct.pack("<I", 0)
+    result += _symbol_record(0x0201, anonymous_guard_payload)
+
     vmt_payload = struct.pack(
         "<IHHII", 0x40, 2, 0, CVInfoTypeEnum.T_32PVOID, names["Vmt"]
     ) + struct.pack("<I", 0)
@@ -234,6 +244,7 @@ def build_td32_stream() -> bytes:
         "fmWarm",
         "TMode",
         "WideString",
+        "$BuildSpecificGuard",
     ]
     names = {
         "Unit1.pas": 1,
@@ -250,6 +261,7 @@ def build_td32_stream() -> bytes:
         "fmWarm": 12,
         "TMode": 13,
         "WideString": 14,
+        "AnonymousGuard": 15,
     }
     subsections = [
         (0x0130, 0, _names_subsection(names_list)),
@@ -343,11 +355,17 @@ def test_delphi_td32_parser_reads_symbols_lines_and_types():
     assert parser.source_ranges == [
         Td32SourceRange(section=1, start=0x10, end=0x40, owner_unit="Unit1")
     ]
+    assert parser.module_owner_units == {1: "Unit1"}
+    assert parser.data_owner_units == {
+        (2, 0x20): "Unit1",
+        (2, 0x24): "Unit1",
+    }
     assert [symbol.name for symbol in parser.symbols] == ["Unit1.TWidget.Click"]
     assert parser.symbols[0].symbols[0].location == "[FFFFFFFC]"
     assert parser.symbols[0].symbols[0].name == "LocalValue"
     assert parser.symbols[0].symbols[1].location == "esi"
     assert parser.globals[0].name == "GlobalValue"
+    assert parser.globals[1].name == "$BuildSpecificGuard"
     assert "@Unit1@TWidget@$vmt" in [public.name for public in parser.publics]
 
     record_type = parser.types.get(CvdumpTypeKey(0x1001))
@@ -440,8 +458,11 @@ def test_delphi_td32_analysis_creates_reccmp_nodes():
 
     data_nodes = [node for node in analysis.nodes if node.node_type == EntityType.DATA]
     assert data_nodes[0].friendly_name == "GlobalValue"
+    assert data_nodes[0].owner_unit == "Unit1"
     assert data_nodes[0].data_type is not None
     assert data_nodes[0].data_type.key == CvdumpTypeKey(0x1001)
+    assert data_nodes[1].friendly_name == "$BuildSpecificGuard"
+    assert data_nodes[1].owner_unit == "Unit1"
 
     vtables = [node for node in analysis.nodes if node.node_type == EntityType.VTABLE]
     assert len(vtables) == 1

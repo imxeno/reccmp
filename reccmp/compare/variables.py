@@ -181,12 +181,13 @@ def create_comparison_item(
     """Helper to create the ComparisonItem from the fields in the reccmp database."""
     if compared is None:
         compared = []
-    assert var.name is not None
+    name = var.best_name()
+    assert name is not None
 
     return ComparisonItem(
         orig_addr=var.orig_addr,
         recomp_addr=var.recomp_addr,
-        name=var.name,
+        name=name,
         compared=compared,
         error=error,
         raw_only=raw_only,
@@ -226,7 +227,8 @@ class VariableComparator:
 
     def compare_variable(self, var: ReccmpMatch) -> ComparisonItem:
         # pylint: disable=too-many-locals
-        assert var.name is not None
+        name = var.best_name()
+        assert name is not None
         type_key = CvdumpTypeKey(var.get("data_type")) if var.get("data_type") else None
 
         # Start by assuming we can only compare the raw bytes
@@ -238,19 +240,26 @@ class VariableComparator:
                 # If we are type-aware, we can get the precise
                 # data size for the variable.
                 data_type = self.types.get(type_key)
-                assert data_type.size is not None
-                data_size = data_type.size
-
-                # Make sure we can retrieve struct or array members.
-                if self.types.get_format_string(type_key):
-                    raw_only = False
-                else:
+                if data_type.size is None:
                     logger.info(
-                        "No struct members for type '0x%x' used by variable '%s' (0x%x). Comparing raw data.",
+                        "No size for type '0x%x' used by variable '%s' (0x%x). Comparing raw data.",
                         type_key,
-                        var.name,
+                        name,
                         var.orig_addr,
                     )
+                else:
+                    data_size = data_type.size
+
+                    # Make sure we can retrieve struct or array members.
+                    if self.types.get_format_string(type_key):
+                        raw_only = False
+                    else:
+                        logger.info(
+                            "No struct members for type '0x%x' used by variable '%s' (0x%x). Comparing raw data.",
+                            type_key,
+                            name,
+                            var.orig_addr,
+                        )
 
             except (CvdumpKeyError, CvdumpIntegrityError):
                 # This may occur even when nothing is wrong, so permit a raw comparison here.
@@ -259,7 +268,7 @@ class VariableComparator:
                 logger.error(
                     "Could not materialize type '0x%x' used by variable '%s' (0x%x). Comparing raw data.",
                     type_key,
-                    var.name,
+                    name,
                     var.orig_addr,
                 )
 

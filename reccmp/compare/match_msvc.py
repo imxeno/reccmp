@@ -10,7 +10,10 @@ from reccmp.compare.event import (
     reccmp_report_nop,
 )
 from reccmp.compare.queries import get_referencing_entity_matches
-from reccmp.delphi.td32 import normalize_delphi_name
+from reccmp.delphi.td32 import (
+    normalize_delphi_name,
+    qualify_delphi_function_name,
+)
 from reccmp.types import ImageId
 
 DELPHI_IDR_PLACEHOLDER_RE = re.compile(
@@ -176,6 +179,26 @@ def match_functions(
                 name = name[:255]
 
             if name in name_index:
+                exact_candidates = name_index.get(name)
+                if (
+                    ent.get("library")
+                    and len(exact_candidates) > 1
+                    and all(
+                        (candidate := db.get(ImageId.RECOMP, address)) is not None
+                        and candidate.get("is_delphi")
+                        for address in exact_candidates
+                    )
+                ):
+                    report(
+                        ReccmpEvent.AMBIGUOUS_MATCH,
+                        ent.orig_addr,
+                        msg=(
+                            f"Deferred ambiguous Delphi library name '{name}' "
+                            f"with {len(exact_candidates)} rebuilt candidates"
+                        ),
+                    )
+                    continue
+
                 recomp_addr = name_index.pop(name)
                 recomp_delphi_name = normalize_delphi_name(recomp_names[recomp_addr])
                 if recomp_delphi_name is not None:
@@ -214,6 +237,27 @@ def match_functions(
             if delphi_name is not None and delphi_name != name and "@" in name:
                 delphi_key = delphi_name.casefold()
                 if delphi_key in delphi_name_index:
+                    delphi_candidates = delphi_name_index.get(delphi_key)
+                    if (
+                        ent.get("library")
+                        and len(delphi_candidates) > 1
+                        and all(
+                            (candidate := db.get(ImageId.RECOMP, address)) is not None
+                            and candidate.get("is_delphi")
+                            for address in delphi_candidates
+                        )
+                    ):
+                        report(
+                            ReccmpEvent.AMBIGUOUS_MATCH,
+                            ent.orig_addr,
+                            msg=(
+                                "Deferred ambiguous Delphi library name "
+                                f"'{delphi_name}' with "
+                                f"{len(delphi_candidates)} rebuilt candidates"
+                            ),
+                        )
+                        continue
+
                     recomp_addr = delphi_name_index.pop(delphi_key)
                     name_index.discard(recomp_names[recomp_addr], recomp_addr)
 
@@ -523,6 +567,9 @@ def match_variables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_n
         assert ent.recomp_addr is not None
         var_name_index.add(name, ent.recomp_addr)
 
+    # Preserve the established exact-name behavior as the first pass. Committing
+    # these matches before building the Delphi index also lets exact matches
+    # disambiguate otherwise identical unit-qualified candidates.
     with db.batch() as batch:
         for ent in db.unmatched(ImageId.ORIG):
             if ent.get("type") != EntityType.DATA:
@@ -540,6 +587,51 @@ def match_variables(db: EntityDb, report: ReccmpReportProtocol = reccmp_report_n
             if name in var_name_index:
                 recomp_addr = var_name_index.pop(name)
                 batch.match(ent.orig_addr, recomp_addr)
+
+    delphi_qualified_index = EntityIndex()
+    for ent in db.unmatched(ImageId.RECOMP):
+        if ent.get("type") and ent.get("type") != EntityType.DATA:
+            continue
+
+        name = ent.get("name")
+        owner_unit = ent.get("owner_unit")
+        if not name or not ent.get("is_delphi") or not owner_unit:
+            continue
+
+        qualified_name = qualify_delphi_function_name(owner_unit, name)
+        if qualified_name is not None:
+            assert ent.recomp_addr is not None
+            delphi_qualified_index.add(qualified_name.casefold(), ent.recomp_addr)
+
+    with db.batch() as batch:
+        for ent in db.unmatched(ImageId.ORIG):
+            if ent.get("type") != EntityType.DATA or ent.get("static_var"):
+                continue
+
+            name = ent.get("name")
+            if not name:
+                continue
+
+            assert ent.orig_addr is not None
+
+            qualified_candidates = delphi_qualified_index.get(name.casefold())
+            if len(qualified_candidates) == 1:
+                recomp_addr = delphi_qualified_index.pop(name.casefold())
+                batch.set(
+                    ImageId.RECOMP,
+                    recomp_addr,
+                    computed_name=name,
+                )
+                batch.match(ent.orig_addr, recomp_addr)
+            elif len(qualified_candidates) > 1:
+                report(
+                    ReccmpEvent.AMBIGUOUS_MATCH,
+                    ent.orig_addr,
+                    msg=(
+                        f"Delphi variable {name} at 0x{ent.orig_addr:x} "
+                        "has multiple unit-qualified matches"
+                    ),
+                )
             else:
                 report(
                     ReccmpEvent.NO_MATCH,
