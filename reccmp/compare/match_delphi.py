@@ -3,7 +3,9 @@
 from collections import defaultdict
 from collections.abc import Callable
 from bisect import bisect_left
+from dataclasses import dataclass
 import re
+import struct
 
 from capstone import (  # type: ignore
     CS_ARCH_X86,
@@ -21,10 +23,64 @@ from .db import EntityDb, ReccmpEntity, ReccmpMatch
 from .event import ReccmpEvent, ReccmpReportProtocol, reccmp_report_nop
 
 MAX_LIFECYCLE_FUNCTION_SIZE = 512
+MIN_LIFECYCLE_TABLE_RECORDS = 4
 DELPHI_LIBRARY_ADDRESS_SUFFIX_RE = re.compile(r"_([0-9a-f]{8})$", re.IGNORECASE)
+DELPHI_LIBRARY_SIGNATURE_SUFFIX_RE = re.compile(r"\((?!\d+\)$)[^()]+\)$")
+DELPHI_LIFECYCLE_NAME_RE = re.compile(
+    r"(?:^|\.)(initialization|finalization)(?:_[0-9a-f]{8}|\(\d+\))?$",
+    re.IGNORECASE,
+)
+ANONYMOUS_DELPHI_UNIT_RE = re.compile(r"^unit\d+$", re.IGNORECASE)
+DELPHI_COMPILER_STARTUP_ROUTINES = frozenset(
+    {
+        "alloctlsbuffer",
+        "gettlssize",
+        "initthreadtls",
+        "gettls",
+        "initializemodule",
+        "initexe",
+    }
+)
 
 
-def _canonical_original_library_name(entity: ReccmpEntity) -> str | None:
+def _anonymous_delphi_unit_key(name: str) -> int | None:
+    if ANONYMOUS_DELPHI_UNIT_RE.fullmatch(name) is None:
+        return None
+    return int(name[4:])
+
+
+def _anonymous_delphi_unit_aliases(db: EntityDb) -> dict[int, str]:
+    """Return source owners proven by already matched anonymous lifecycles."""
+
+    candidates: defaultdict[int, set[str]] = defaultdict(set)
+    for entity in db.all(ImageId.ORIG):
+        raw_name = entity.name
+        best_name = entity.best_name()
+        if (
+            not entity.matched
+            or not isinstance(raw_name, str)
+            or not isinstance(best_name, str)
+            or "." not in raw_name
+            or "." not in best_name
+            or _lifecycle_routine_key(entity) is None
+        ):
+            continue
+        raw_owner = raw_name.split(".", 1)[0]
+        key = _anonymous_delphi_unit_key(raw_owner)
+        best_owner = best_name.split(".", 1)[0]
+        if key is not None and _anonymous_delphi_unit_key(best_owner) is None:
+            candidates[key].add(best_owner)
+    return {
+        key: next(iter(owners))
+        for key, owners in candidates.items()
+        if len(owners) == 1
+    }
+
+
+def _canonical_original_library_name(
+    entity: ReccmpEntity,
+    anonymous_unit_aliases: dict[int, str] | None = None,
+) -> str | None:
     """Return a safe case-insensitive key for an original library function.
 
     IDR appends an address to many otherwise canonical Delphi names.  Accept
@@ -42,6 +98,19 @@ def _canonical_original_library_name(entity: ReccmpEntity) -> str | None:
             return None
         name = name[: suffix.start()]
 
+    # Runtime inventories sometimes distinguish Delphi overloads with a
+    # reporting-only parameter type. TD32 stores the shared routine name; put
+    # only non-numeric signature suffixes into the overload group and let the
+    # existing unique-size rule select a member.
+    name = DELPHI_LIBRARY_SIGNATURE_SUFFIX_RE.sub("", name)
+
+    parts = name.split(".")
+    if anonymous_unit_aliases and parts:
+        unit_key = _anonymous_delphi_unit_key(parts[0])
+        if unit_key in anonymous_unit_aliases:
+            parts[0] = anonymous_unit_aliases[unit_key]
+        name = ".".join(parts)
+
     # Delphi identifiers are case-insensitive.  TD32 also omits IDR's ``@``
     # compiler decoration from individual qualified-name components.
     name = ".".join(part.removeprefix("@") for part in name.split("."))
@@ -51,7 +120,11 @@ def _canonical_original_library_name(entity: ReccmpEntity) -> str | None:
 def _canonical_recompiled_library_name(entity: ReccmpEntity) -> str | None:
     name = entity.name
     owner_unit = entity.get("owner_unit")
-    if not entity.get("is_delphi") or not isinstance(name, str) or not isinstance(owner_unit, str):
+    if (
+        not entity.get("is_delphi")
+        or not isinstance(name, str)
+        or not isinstance(owner_unit, str)
+    ):
         return None
 
     if not name.casefold().startswith(f"{owner_unit}.".casefold()):
@@ -72,13 +145,14 @@ def match_delphi_library_functions(
     available to the later structural-layout matcher.
     """
 
+    anonymous_unit_aliases = _anonymous_delphi_unit_aliases(db)
     original_groups: defaultdict[str, list[ReccmpEntity]] = defaultdict(list)
     recompiled_groups: defaultdict[str, list[ReccmpEntity]] = defaultdict(list)
 
     for entity in db.unmatched(ImageId.ORIG):
         if entity.entity_type != EntityType.FUNCTION or not entity.get("library"):
             continue
-        key = _canonical_original_library_name(entity)
+        key = _canonical_original_library_name(entity, anonymous_unit_aliases)
         if key is not None:
             original_groups[key].append(entity)
 
@@ -138,9 +212,219 @@ def match_delphi_library_functions(
             )
 
     db.bulk_match(pairs)
+    _match_delphi_library_overload_order(db, report)
+    _match_delphi_nested_library_functions(db, report)
 
 
-def _canonical_original_library_spelling(entity: ReccmpEntity) -> str | None:
+def _matched_delphi_library_anchors(db: EntityDb, owner_key: str) -> list[ReccmpMatch]:
+    return [
+        match
+        for match in db.get_functions()
+        if match.get("library")
+        and match.get("is_delphi")
+        and isinstance(match.get("owner_unit"), str)
+        and match.get("owner_unit").casefold() == owner_key
+    ]
+
+
+def _match_delphi_library_overload_order(
+    db: EntityDb,
+    report: ReccmpReportProtocol,
+) -> None:
+    """Resolve equal overload groups only inside corresponding matched anchors."""
+
+    aliases = _anonymous_delphi_unit_aliases(db)
+    original_groups: defaultdict[str, list[ReccmpEntity]] = defaultdict(list)
+    recompiled_groups: defaultdict[str, list[ReccmpEntity]] = defaultdict(list)
+    for entity in db.unmatched(ImageId.ORIG):
+        if entity.entity_type == EntityType.FUNCTION and entity.get("library"):
+            key = _canonical_original_library_name(entity, aliases)
+            if key is not None:
+                original_groups[key].append(entity)
+    for entity in db.unmatched(ImageId.RECOMP):
+        if entity.entity_type == EntityType.FUNCTION:
+            key = _canonical_recompiled_library_name(entity)
+            if key is not None:
+                recompiled_groups[key].append(entity)
+
+    pairs: list[tuple[int, int]] = []
+    for key, originals in original_groups.items():
+        candidates = recompiled_groups.get(key, [])
+        if len(originals) != len(candidates) or len(originals) < 2:
+            continue
+        originals.sort(key=lambda entity: entity.orig_addr)
+        candidates.sort(key=lambda entity: entity.recomp_addr)
+        owner_key = key.split(".", 1)[0]
+        anchors = _matched_delphi_library_anchors(db, owner_key)
+
+        def position(address: int, first: int, last: int) -> int:
+            if address < first:
+                return -1
+            if address > last:
+                return 1
+            return 0
+
+        if any(
+            position(anchor.orig_addr, originals[0].orig_addr, originals[-1].orig_addr)
+            != position(
+                anchor.recomp_addr,
+                candidates[0].recomp_addr,
+                candidates[-1].recomp_addr,
+            )
+            for anchor in anchors
+        ):
+            continue
+        original_before = [
+            anchor for anchor in anchors if anchor.orig_addr < originals[0].orig_addr
+        ]
+        original_after = [
+            anchor for anchor in anchors if anchor.orig_addr > originals[-1].orig_addr
+        ]
+        recompiled_before = [
+            anchor
+            for anchor in anchors
+            if anchor.recomp_addr < candidates[0].recomp_addr
+        ]
+        recompiled_after = [
+            anchor
+            for anchor in anchors
+            if anchor.recomp_addr > candidates[-1].recomp_addr
+        ]
+        if not all(
+            (original_before, original_after, recompiled_before, recompiled_after)
+        ):
+            continue
+        if max(original_before, key=lambda anchor: anchor.orig_addr) is not max(
+            recompiled_before, key=lambda anchor: anchor.recomp_addr
+        ) or min(original_after, key=lambda anchor: anchor.orig_addr) is not min(
+            recompiled_after, key=lambda anchor: anchor.recomp_addr
+        ):
+            continue
+
+        for original, candidate in zip(originals, candidates):
+            assert original.orig_addr is not None and candidate.recomp_addr is not None
+            pairs.append((original.orig_addr, candidate.recomp_addr))
+        report(
+            ReccmpEvent.GENERAL_WARNING,
+            originals[0].orig_addr,
+            msg=f"Matched Delphi overload group '{key}' by verified anchored source order",
+        )
+    db.bulk_match(pairs)
+
+
+def _match_delphi_nested_library_functions(
+    db: EntityDb,
+    report: ReccmpReportProtocol,
+) -> None:
+    """Match a unique TD32-flattened nested routine to its source hierarchy."""
+
+    aliases = _anonymous_delphi_unit_aliases(db)
+    known_original_names = {
+        key
+        for entity in db.all(ImageId.ORIG)
+        if entity.entity_type == EntityType.FUNCTION
+        for key in [_canonical_original_library_name(entity, aliases)]
+        if key is not None
+    }
+    recompiled_by_flat_name: defaultdict[str, list[ReccmpEntity]] = defaultdict(list)
+    for entity in db.unmatched(ImageId.RECOMP):
+        if entity.entity_type != EntityType.FUNCTION:
+            continue
+        key = _canonical_recompiled_library_name(entity)
+        if key is not None:
+            recompiled_by_flat_name[key].append(entity)
+
+    pairs: list[tuple[int, int]] = []
+    for entity in db.unmatched(ImageId.ORIG):
+        if entity.entity_type != EntityType.FUNCTION or not entity.get("library"):
+            continue
+        key = _canonical_original_library_name(entity, aliases)
+        if key is None:
+            continue
+        parts = key.split(".")
+        if len(parts) < 3 or ".".join(parts[:-1]) not in known_original_names:
+            continue
+        flat_key = f"{parts[0]}.{parts[-1]}"
+        candidates = recompiled_by_flat_name.get(flat_key, [])
+        if len(candidates) != 1:
+            if candidates:
+                assert entity.orig_addr is not None
+                report(
+                    ReccmpEvent.AMBIGUOUS_MATCH,
+                    entity.orig_addr,
+                    msg=f"Ambiguous flattened Delphi nested routine '{flat_key}'",
+                )
+            continue
+        assert entity.orig_addr is not None and candidates[0].recomp_addr is not None
+        pairs.append((entity.orig_addr, candidates[0].recomp_addr))
+    db.bulk_match(pairs)
+
+
+def match_delphi_compiler_startup_functions(
+    db: EntityDb,
+    report: ReccmpReportProtocol = reccmp_report_nop,
+) -> None:
+    """Associate Delphi's anonymous executable startup unit with SysInit."""
+
+    originals: dict[str, list[ReccmpEntity]] = defaultdict(list)
+    candidates: dict[str, list[ReccmpEntity]] = defaultdict(list)
+    for entity in db.unmatched(ImageId.ORIG):
+        name = entity.name
+        if (
+            entity.entity_type != EntityType.FUNCTION
+            or not entity.get("library")
+            or not isinstance(name, str)
+        ):
+            continue
+        parts = [part.removeprefix("@").casefold() for part in name.split(".")]
+        if (
+            len(parts) == 2
+            and _anonymous_delphi_unit_key(parts[0]) is not None
+            and parts[1] in DELPHI_COMPILER_STARTUP_ROUTINES
+        ):
+            originals[parts[1]].append(entity)
+    for entity in db.unmatched(ImageId.RECOMP):
+        name = entity.name
+        owner = entity.get("owner_unit")
+        if (
+            entity.entity_type != EntityType.FUNCTION
+            or not entity.get("is_delphi")
+            or not isinstance(name, str)
+            or not isinstance(owner, str)
+            or owner.casefold() != "sysinit"
+        ):
+            continue
+        leaf = name.rsplit(".", 1)[-1].removeprefix("@").casefold()
+        if leaf in DELPHI_COMPILER_STARTUP_ROUTINES:
+            candidates[leaf].append(entity)
+
+    shared = set(originals) & set(candidates)
+    if len(shared) < 3:
+        return
+    pairs: list[tuple[int, int]] = []
+    for leaf in shared:
+        if len(originals[leaf]) != 1 or len(candidates[leaf]) != 1:
+            continue
+        original = originals[leaf][0]
+        candidate = candidates[leaf][0]
+        if original.size(ImageId.ORIG) != candidate.size(ImageId.RECOMP):
+            continue
+        assert original.orig_addr is not None and candidate.recomp_addr is not None
+        pairs.append((original.orig_addr, candidate.recomp_addr))
+    if len(pairs) < 3:
+        return
+    db.bulk_match(pairs)
+    report(
+        ReccmpEvent.GENERAL_WARNING,
+        min(original for original, _ in pairs),
+        msg=f"Matched {len(pairs)} Delphi SysInit startup routines by name and exact size",
+    )
+
+
+def _canonical_original_library_spelling(
+    entity: ReccmpEntity,
+    anonymous_unit_aliases: dict[int, str] | None = None,
+) -> str | None:
     name = entity.name
     if not isinstance(name, str) or entity.orig_addr is None:
         return None
@@ -151,7 +435,12 @@ def _canonical_original_library_spelling(entity: ReccmpEntity) -> str | None:
             return None
         name = name[: suffix.start()]
 
-    return ".".join(part.removeprefix("@") for part in name.split(".")).rstrip(".")
+    parts = [part.removeprefix("@") for part in name.split(".")]
+    if anonymous_unit_aliases and parts:
+        unit_key = _anonymous_delphi_unit_key(parts[0])
+        if unit_key in anonymous_unit_aliases:
+            parts[0] = anonymous_unit_aliases[unit_key]
+    return ".".join(parts).rstrip(".")
 
 
 def _instruction_operand_shape(instruction, operand) -> tuple:
@@ -187,7 +476,10 @@ def _instruction_shapes(image: Image, address: int, count: int = 2) -> tuple | N
         shapes.append(
             (
                 instruction.mnemonic,
-                tuple(_instruction_operand_shape(instruction, operand) for operand in instruction.operands),
+                tuple(
+                    _instruction_operand_shape(instruction, operand)
+                    for operand in instruction.operands
+                ),
             )
         )
         if len(shapes) == count or instruction.mnemonic.startswith("ret"):
@@ -221,7 +513,11 @@ def _instruction_fingerprint_operand(image: Image, instruction, operand) -> tupl
         memory = operand.mem
         displacement: int | str = memory.disp
         relocation_site = instruction.address + instruction.disp_offset
-        if memory.base == 0 and memory.index == 0 and _is_relocated_operand(image, relocation_site):
+        if (
+            memory.base == 0
+            and memory.index == 0
+            and _is_relocated_operand(image, relocation_site)
+        ):
             displacement = "address"
         return (
             CS_OP_MEM,
@@ -235,7 +531,9 @@ def _instruction_fingerprint_operand(image: Image, instruction, operand) -> tupl
     return (operand.type, operand.size)
 
 
-def _instruction_fingerprint(image: Image, address: int, size: int, count: int = 8) -> tuple | None:
+def _instruction_fingerprint(
+    image: Image, address: int, size: int, count: int = 8
+) -> tuple | None:
     if size <= 0:
         return None
     try:
@@ -251,7 +549,8 @@ def _instruction_fingerprint(image: Image, address: int, size: int, count: int =
             (
                 instruction.mnemonic,
                 tuple(
-                    _instruction_fingerprint_operand(image, instruction, operand) for operand in instruction.operands
+                    _instruction_fingerprint_operand(image, instruction, operand)
+                    for operand in instruction.operands
                 ),
             )
         )
@@ -284,7 +583,9 @@ def _direct_local_jump_targets(image: Image, address: int, size: int) -> set[int
     return result
 
 
-def _first_direct_local_jump_target(image: Image, address: int, size: int) -> int | None:
+def _first_direct_local_jump_target(
+    image: Image, address: int, size: int
+) -> int | None:
     """Return the first direct local JMP target in instruction order."""
 
     if size <= 0:
@@ -311,7 +612,9 @@ def _first_direct_local_jump_target(image: Image, address: int, size: int) -> in
     return None
 
 
-def _direct_control_targets(image: Image, address: int, size: int) -> tuple[tuple[str, int], ...]:
+def _direct_control_targets(
+    image: Image, address: int, size: int
+) -> tuple[tuple[str, int], ...]:
     if size <= 0:
         return tuple()
     try:
@@ -357,7 +660,9 @@ def _is_executable_range(image: Image, address: int, size: int) -> bool:
     return len(matches) == 1
 
 
-def _library_candidate_at(db: EntityDb, address: int, owner_key: str) -> tuple[bool, ReccmpEntity | None]:
+def _library_candidate_at(
+    db: EntityDb, address: int, owner_key: str
+) -> tuple[bool, ReccmpEntity | None]:
     candidate = db.get(ImageId.RECOMP, address)
     if candidate is not None:
         candidate_owner = candidate.get("owner_unit")
@@ -373,7 +678,9 @@ def _library_candidate_at(db: EntityDb, address: int, owner_key: str) -> tuple[b
     containing = db.get(ImageId.RECOMP, address, exact=False)
     containing_owner = containing.get("owner_unit") if containing is not None else None
     containing_size = (
-        (containing.size(ImageId.RECOMP) or containing.max_size(ImageId.RECOMP) or 0) if containing is not None else 0
+        (containing.size(ImageId.RECOMP) or containing.max_size(ImageId.RECOMP) or 0)
+        if containing is not None
+        else 0
     )
     valid = (
         containing is not None
@@ -403,7 +710,9 @@ def _apply_library_boundary_proposals(
     with db.batch() as batch:
         for entity, recompiled_address, spelling, owner_unit, candidate in proposals:
             assert entity.orig_addr is not None
-            inferred_size = entity.size(ImageId.ORIG) or entity.max_size(ImageId.ORIG) or 0
+            inferred_size = (
+                entity.size(ImageId.ORIG) or entity.max_size(ImageId.ORIG) or 0
+            )
             if candidate is None:
                 batch.set(
                     ImageId.RECOMP,
@@ -418,14 +727,17 @@ def _apply_library_boundary_proposals(
             batch.match(entity.orig_addr, recompiled_address)
 
             previous = db.get(ImageId.RECOMP, recompiled_address, exact=False)
-            previous_owner = previous.get("owner_unit") if previous is not None else None
+            previous_owner = (
+                previous.get("owner_unit") if previous is not None else None
+            )
             if (
                 previous is not None
                 and previous.recomp_addr is not None
                 and previous.recomp_addr < recompiled_address
                 and isinstance(previous_owner, str)
                 and previous_owner.casefold() == owner_unit.casefold()
-                and (previous.size(ImageId.RECOMP) or 0) > recompiled_address - previous.recomp_addr
+                and (previous.size(ImageId.RECOMP) or 0)
+                > recompiled_address - previous.recomp_addr
             ):
                 batch.set(
                     ImageId.RECOMP,
@@ -438,7 +750,10 @@ def _apply_library_boundary_proposals(
         report(
             ReccmpEvent.GENERAL_WARNING,
             entity.orig_addr,
-            msg=(f"Matched Delphi library boundary '{spelling}' at " f"0x{recompiled_address:x} from {reason}"),
+            msg=(
+                f"Matched Delphi library boundary '{spelling}' at "
+                f"0x{recompiled_address:x} from {reason}"
+            ),
         )
 
 
@@ -456,11 +771,18 @@ def match_delphi_library_layout(
     and static/nested library functions that TD32 groups into a larger range.
     """
 
+    anonymous_unit_aliases = _anonymous_delphi_unit_aliases(db)
     anchors_by_owner: defaultdict[str, list[tuple[int, int]]] = defaultdict(list)
     for match in db.get_functions():
         owner_unit = match.get("owner_unit")
-        if match.get("library") and match.get("is_delphi") and isinstance(owner_unit, str):
-            anchors_by_owner[owner_unit.casefold()].append((match.orig_addr, match.recomp_addr))
+        if (
+            match.get("library")
+            and match.get("is_delphi")
+            and isinstance(owner_unit, str)
+        ):
+            anchors_by_owner[owner_unit.casefold()].append(
+                (match.orig_addr, match.recomp_addr)
+            )
     for anchors in anchors_by_owner.values():
         anchors.sort()
 
@@ -471,7 +793,7 @@ def match_delphi_library_layout(
         if entity.entity_type != EntityType.FUNCTION or not entity.get("library"):
             continue
 
-        spelling = _canonical_original_library_spelling(entity)
+        spelling = _canonical_original_library_spelling(entity, anonymous_unit_aliases)
         if spelling is None or "." not in spelling:
             continue
         owner_unit = spelling.split(".", 1)[0]
@@ -505,7 +827,9 @@ def match_delphi_library_layout(
         inferred_size = entity.size(ImageId.ORIG) or entity.max_size(ImageId.ORIG) or 0
         if not _is_executable_range(original_image, entity.orig_addr, inferred_size):
             continue
-        if not _is_executable_range(recompiled_image, recompiled_address, inferred_size):
+        if not _is_executable_range(
+            recompiled_image, recompiled_address, inferred_size
+        ):
             continue
         # The two anchors prove the source-order displacement.  Codegen inside
         # the span may still differ (especially compiler cleanup entries), so
@@ -532,7 +856,9 @@ def match_delphi_library_layout(
         proposed_recompiled_addresses.add(recompiled_address)
 
     _apply_library_boundary_proposals(db, proposals, report, "stable unit layout")
-    _match_delphi_library_alternate_entries(db, original_image, recompiled_image, report)
+    _match_delphi_library_alternate_entries(
+        db, original_image, recompiled_image, report
+    )
     _match_delphi_library_fingerprints(db, original_image, recompiled_image, report)
     _split_overlapping_delphi_library_ranges(db)
 
@@ -587,10 +913,15 @@ def _match_delphi_library_alternate_entries(
 ):
     """Map hidden entries reached by a matched parent's local jump."""
 
+    anonymous_unit_aliases = _anonymous_delphi_unit_aliases(db)
     anchors_by_owner: defaultdict[str, list[ReccmpMatch]] = defaultdict(list)
     for match in db.get_functions():
         owner_unit = match.get("owner_unit")
-        if match.get("library") and match.get("is_delphi") and isinstance(owner_unit, str):
+        if (
+            match.get("library")
+            and match.get("is_delphi")
+            and isinstance(owner_unit, str)
+        ):
             anchors_by_owner[owner_unit.casefold()].append(match)
     for anchors in anchors_by_owner.values():
         anchors.sort(key=lambda item: item.orig_addr)
@@ -598,7 +929,7 @@ def _match_delphi_library_alternate_entries(
     proposals: list[LibraryBoundaryProposal] = []
     proposed_addresses: set[int] = set()
     for entity in list(db.unmatched(ImageId.ORIG)):
-        spelling = _canonical_original_library_spelling(entity)
+        spelling = _canonical_original_library_spelling(entity, anonymous_unit_aliases)
         if (
             entity.entity_type != EntityType.FUNCTION
             or not entity.get("library")
@@ -611,22 +942,34 @@ def _match_delphi_library_alternate_entries(
         owner_key = owner_unit.casefold()
         anchors = anchors_by_owner.get(owner_key, [])
         previous = next(
-            (anchor for anchor in reversed(anchors) if anchor.orig_addr < entity.orig_addr),
+            (
+                anchor
+                for anchor in reversed(anchors)
+                if anchor.orig_addr < entity.orig_addr
+            ),
             None,
         )
         if previous is None:
             continue
 
-        original_parent_size = previous.max_size(ImageId.ORIG) or previous.size(ImageId.ORIG) or 0
+        original_parent_size = (
+            previous.max_size(ImageId.ORIG) or previous.size(ImageId.ORIG) or 0
+        )
         original_first_target = _first_direct_local_jump_target(
             original_image, previous.orig_addr, original_parent_size
         )
-        if entity.orig_addr != original_first_target and entity.orig_addr not in _direct_local_jump_targets(
-            original_image, previous.orig_addr, original_parent_size
+        if (
+            entity.orig_addr != original_first_target
+            and entity.orig_addr
+            not in _direct_local_jump_targets(
+                original_image, previous.orig_addr, original_parent_size
+            )
         ):
             continue
 
-        recompiled_parent_size = previous.size(ImageId.RECOMP) or previous.max_size(ImageId.RECOMP) or 0
+        recompiled_parent_size = (
+            previous.size(ImageId.RECOMP) or previous.max_size(ImageId.RECOMP) or 0
+        )
         recompiled_first_target = _first_direct_local_jump_target(
             recompiled_image, previous.recomp_addr, recompiled_parent_size
         )
@@ -639,7 +982,9 @@ def _match_delphi_library_alternate_entries(
         ):
             candidates = {recompiled_first_target}
         else:
-            candidates = _direct_local_jump_targets(recompiled_image, previous.recomp_addr, recompiled_parent_size)
+            candidates = _direct_local_jump_targets(
+                recompiled_image, previous.recomp_addr, recompiled_parent_size
+            )
             candidates = {
                 address
                 for address in candidates
@@ -653,7 +998,8 @@ def _match_delphi_library_alternate_entries(
                     ReccmpEvent.AMBIGUOUS_MATCH,
                     entity.orig_addr,
                     msg=(
-                        f"Rejected Delphi alternate entry '{spelling}': " f"found {len(candidates)} local jump targets"
+                        f"Rejected Delphi alternate entry '{spelling}': "
+                        f"found {len(candidates)} local jump targets"
                     ),
                 )
             continue
@@ -663,7 +1009,9 @@ def _match_delphi_library_alternate_entries(
         proposals.append((entity, address, spelling, owner_unit, candidate))
         proposed_addresses.add(address)
 
-    _apply_library_boundary_proposals(db, proposals, report, "matched-parent local control flow")
+    _apply_library_boundary_proposals(
+        db, proposals, report, "matched-parent local control flow"
+    )
 
 
 def _match_delphi_library_fingerprints(
@@ -674,6 +1022,7 @@ def _match_delphi_library_fingerprints(
 ):  # pylint: disable=too-many-locals
     """Find layout-break boundaries by unique, unit-scoped code shape."""
 
+    anonymous_unit_aliases = _anonymous_delphi_unit_aliases(db)
     anchors_by_owner: defaultdict[str, list[tuple[int, int]]] = defaultdict(list)
     owner_ranges: dict[str, tuple[int, int]] = {}
     owner_instruction_boundaries: defaultdict[str, set[int]] = defaultdict(set)
@@ -688,7 +1037,9 @@ def _match_delphi_library_fingerprints(
         ):
             continue
         owner_key = owner_unit.casefold()
-        end = entity.recomp_addr + (entity.size(ImageId.RECOMP) or entity.max_size(ImageId.RECOMP) or 1)
+        end = entity.recomp_addr + (
+            entity.size(ImageId.RECOMP) or entity.max_size(ImageId.RECOMP) or 1
+        )
         if owner_key in owner_ranges:
             start, current_end = owner_ranges[owner_key]
             owner_ranges[owner_key] = (
@@ -704,17 +1055,25 @@ def _match_delphi_library_fingerprints(
         except (IndexError, ValueError, OSError):
             continue
         owner_instruction_boundaries[owner_key].update(
-            instruction.address for instruction in boundary_disassembler.disasm(blob, entity.recomp_addr)
+            instruction.address
+            for instruction in boundary_disassembler.disasm(blob, entity.recomp_addr)
         )
 
     ordered_owner_boundaries = {
-        owner: tuple(sorted(addresses)) for owner, addresses in owner_instruction_boundaries.items()
+        owner: tuple(sorted(addresses))
+        for owner, addresses in owner_instruction_boundaries.items()
     }
 
     for match in db.get_functions():
         owner_unit = match.get("owner_unit")
-        if match.get("library") and match.get("is_delphi") and isinstance(owner_unit, str):
-            anchors_by_owner[owner_unit.casefold()].append((match.orig_addr, match.recomp_addr))
+        if (
+            match.get("library")
+            and match.get("is_delphi")
+            and isinstance(owner_unit, str)
+        ):
+            anchors_by_owner[owner_unit.casefold()].append(
+                (match.orig_addr, match.recomp_addr)
+            )
     for anchors in anchors_by_owner.values():
         anchors.sort()
 
@@ -723,7 +1082,7 @@ def _match_delphi_library_fingerprints(
     for entity in list(db.unmatched(ImageId.ORIG)):
         if entity.entity_type != EntityType.FUNCTION or not entity.get("library"):
             continue
-        spelling = _canonical_original_library_spelling(entity)
+        spelling = _canonical_original_library_spelling(entity, anonymous_unit_aliases)
         if spelling is None or "." not in spelling or entity.orig_addr is None:
             continue
         owner_unit = spelling.split(".", 1)[0]
@@ -733,7 +1092,9 @@ def _match_delphi_library_fingerprints(
             continue
 
         size = entity.size(ImageId.ORIG) or entity.max_size(ImageId.ORIG) or 0
-        original_fingerprint = _instruction_fingerprint(original_image, entity.orig_addr, size)
+        original_fingerprint = _instruction_fingerprint(
+            original_image, entity.orig_addr, size
+        )
         if original_fingerprint is None:
             report(
                 ReccmpEvent.GENERAL_WARNING,
@@ -767,11 +1128,16 @@ def _match_delphi_library_fingerprints(
             if not _is_executable_range(recompiled_image, candidate_address, size):
                 continue
 
-            valid_candidate, candidate = _library_candidate_at(db, candidate_address, owner_key)
+            valid_candidate, candidate = _library_candidate_at(
+                db, candidate_address, owner_key
+            )
             if not valid_candidate:
                 continue
 
-            if _instruction_fingerprint(recompiled_image, candidate_address, size) == original_fingerprint:
+            if (
+                _instruction_fingerprint(recompiled_image, candidate_address, size)
+                == original_fingerprint
+            ):
                 candidates.append((candidate_address, candidate))
 
         # Compiler version and local-entry differences can alter registers or
@@ -780,19 +1146,30 @@ def _match_delphi_library_fingerprints(
         # pass found nothing, and require at least three instructions plus a
         # single candidate inside the same owner/order span.
         if not candidates:
-            relaxed_original = _instruction_shapes(original_image, entity.orig_addr, count=6)
+            relaxed_original = _instruction_shapes(
+                original_image, entity.orig_addr, count=6
+            )
             if relaxed_original is not None and len(relaxed_original) >= 3:
                 for candidate_address in ordered_owner_boundaries.get(owner_key, ()):
                     if not search_start <= candidate_address < search_end:
                         continue
                     if candidate_address in proposed_addresses:
                         continue
-                    if not _is_executable_range(recompiled_image, candidate_address, size):
+                    if not _is_executable_range(
+                        recompiled_image, candidate_address, size
+                    ):
                         continue
-                    valid_candidate, candidate = _library_candidate_at(db, candidate_address, owner_key)
+                    valid_candidate, candidate = _library_candidate_at(
+                        db, candidate_address, owner_key
+                    )
                     if not valid_candidate:
                         continue
-                    if _instruction_shapes(recompiled_image, candidate_address, count=6) == relaxed_original:
+                    if (
+                        _instruction_shapes(
+                            recompiled_image, candidate_address, count=6
+                        )
+                        == relaxed_original
+                    ):
                         candidates.append((candidate_address, candidate))
 
         # Tiny compiler thunks often move as a group and therefore fall
@@ -801,7 +1178,9 @@ def _match_delphi_library_fingerprints(
         # targets to refine an ambiguous local fingerprint as well as to search
         # the full owning unit. This distinguishes same-shaped JMP/CALL thunks
         # without relying on their layout.
-        mapped_targets = _mapped_original_control_targets(db, original_image, entity.orig_addr, size)
+        mapped_targets = _mapped_original_control_targets(
+            db, original_image, entity.orig_addr, size
+        )
         if mapped_targets is not None and len(candidates) != 1:
             owner_start, owner_end = owner_range
             target_candidates: list[tuple[int, ReccmpEntity | None]] = []
@@ -812,18 +1191,30 @@ def _match_delphi_library_fingerprints(
                     continue
                 if not _is_executable_range(recompiled_image, candidate_address, size):
                     continue
-                valid_candidate, candidate = _library_candidate_at(db, candidate_address, owner_key)
+                valid_candidate, candidate = _library_candidate_at(
+                    db, candidate_address, owner_key
+                )
                 if not valid_candidate:
                     continue
-                if _instruction_fingerprint(recompiled_image, candidate_address, size) != original_fingerprint:
+                if (
+                    _instruction_fingerprint(recompiled_image, candidate_address, size)
+                    != original_fingerprint
+                ):
                     continue
-                if _direct_control_targets(recompiled_image, candidate_address, size) != mapped_targets:
+                if (
+                    _direct_control_targets(recompiled_image, candidate_address, size)
+                    != mapped_targets
+                ):
                     continue
                 target_candidates.append((candidate_address, candidate))
             candidates = target_candidates
 
         if len(candidates) != 1:
-            event = ReccmpEvent.AMBIGUOUS_MATCH if len(candidates) > 1 else ReccmpEvent.GENERAL_WARNING
+            event = (
+                ReccmpEvent.AMBIGUOUS_MATCH
+                if len(candidates) > 1
+                else ReccmpEvent.GENERAL_WARNING
+            )
             report(
                 event,
                 entity.orig_addr,
@@ -838,11 +1229,673 @@ def _match_delphi_library_fingerprints(
         proposals.append((entity, candidate_address, spelling, owner_unit, candidate))
         proposed_addresses.add(candidate_address)
 
-    _apply_library_boundary_proposals(db, proposals, report, "unique unit-scoped instruction fingerprint")
+    _apply_library_boundary_proposals(
+        db, proposals, report, "unique unit-scoped instruction fingerprint"
+    )
     # A unique fingerprint can disambiguate one member of an overload group.
     # Re-run the canonical pass so a remaining one-to-one pair is not left
     # unmatched merely because the group was ambiguous before sizing/layout.
     match_delphi_library_functions(db, report)
+
+
+@dataclass(frozen=True)
+class _LifecycleTableRecord:
+    table_address: int
+    initialization_address: int
+    finalization_address: int
+    initialization: ReccmpEntity | None
+    finalization: ReccmpEntity | None
+
+
+def _lifecycle_routine_key(entity: ReccmpEntity | None) -> str | None:
+    if entity is None:
+        return None
+    name = entity.best_name()
+    if not isinstance(name, str):
+        return None
+    match = DELPHI_LIFECYCLE_NAME_RE.search(name)
+    return match.group(1).casefold() if match is not None else None
+
+
+def _lifecycle_original_owner(entity: ReccmpEntity | None) -> str | None:
+    if entity is None:
+        return None
+    name = entity.best_name()
+    if not isinstance(name, str) or "." not in name:
+        return None
+    return name.split(".", 1)[0]
+
+
+def _lifecycle_entities_by_address(
+    db: EntityDb, image_id: ImageId
+) -> dict[int, ReccmpEntity]:
+    result: dict[int, ReccmpEntity] = {}
+    for entity in db.all(image_id):
+        address = entity.addr(image_id)
+        if (
+            address is not None
+            and entity.entity_type == EntityType.FUNCTION
+            and _lifecycle_routine_key(entity) is not None
+        ):
+            result[address] = entity
+    return result
+
+
+def _find_delphi_lifecycle_table(
+    db: EntityDb,
+    image_id: ImageId,
+    image: Image,
+) -> tuple[_LifecycleTableRecord, ...] | None:
+    """Find the unique longest Delphi unit initialization table.
+
+    Delphi emits the table as pairs of absolute function pointers in
+    ``Initialization, Finalization`` order.  A null pointer is allowed for one
+    half of a record, but every accepted record must expose at least one known
+    lifecycle routine.  The real table is by far the longest such run in a PE;
+    reject equal longest runs rather than choosing one by address.
+    """
+
+    lifecycle = _lifecycle_entities_by_address(db, image_id)
+    candidates: list[tuple[_LifecycleTableRecord, ...]] = []
+
+    def is_executable_pointer(address: int) -> bool:
+        if address == 0:
+            return True
+        return any(
+            address in section.virtual_range
+            and section.flags & ImageSectionFlags.EXECUTE
+            for section in image.sections
+        )
+
+    for section in image.sections:
+        if not section.flags & ImageSectionFlags.READ:
+            continue
+        data = section.view
+        aligned_start = (-section.virtual_range.start) % 4
+        for offset in range(aligned_start, len(data) - 7, 4):
+            initialization_address, finalization_address = struct.unpack_from(
+                "<II", data, offset
+            )
+            initialization = lifecycle.get(initialization_address)
+            finalization = lifecycle.get(finalization_address)
+            if _lifecycle_routine_key(initialization) != "initialization":
+                continue
+            if finalization_address != 0 and (
+                _lifecycle_routine_key(finalization) != "finalization"
+            ):
+                continue
+
+            records: list[_LifecycleTableRecord] = []
+            cursor = offset
+            while cursor <= len(data) - 8:
+                initialization_address, finalization_address = struct.unpack_from(
+                    "<II", data, cursor
+                )
+                initialization = lifecycle.get(initialization_address)
+                finalization = lifecycle.get(finalization_address)
+                initialization_key = _lifecycle_routine_key(initialization)
+                finalization_key = _lifecycle_routine_key(finalization)
+                if initialization_key not in (None, "initialization"):
+                    break
+                if finalization_key not in (None, "finalization"):
+                    break
+                if initialization_address == 0 and finalization_address == 0:
+                    break
+                known_keys = {initialization_key, finalization_key} - {None}
+                if (
+                    not known_keys
+                    or not is_executable_pointer(initialization_address)
+                    or not is_executable_pointer(finalization_address)
+                ):
+                    break
+                records.append(
+                    _LifecycleTableRecord(
+                        table_address=section.virtual_range.start + cursor,
+                        initialization_address=initialization_address,
+                        finalization_address=finalization_address,
+                        initialization=initialization,
+                        finalization=finalization,
+                    )
+                )
+                cursor += 8
+
+            if len(records) >= MIN_LIFECYCLE_TABLE_RECORDS:
+                candidates.append(tuple(records))
+
+    if not candidates:
+        return None
+    longest_size = max(len(candidate) for candidate in candidates)
+    longest = [candidate for candidate in candidates if len(candidate) == longest_size]
+    return longest[0] if len(longest) == 1 else None
+
+
+def _lifecycle_record_owner(record: _LifecycleTableRecord) -> str | None:
+    owners = {
+        entity.get("owner_unit")
+        for entity in (record.initialization, record.finalization)
+        if entity is not None and isinstance(entity.get("owner_unit"), str)
+    }
+    return next(iter(owners)) if len(owners) == 1 else None
+
+
+def _lifecycle_record_match_index(
+    record: _LifecycleTableRecord,
+    recompiled_record_by_function: dict[int, int],
+) -> int | None:
+    indices = {
+        recompiled_record_by_function[entity.recomp_addr]
+        for entity in (record.initialization, record.finalization)
+        if entity is not None
+        and entity.matched
+        and entity.recomp_addr in recompiled_record_by_function
+    }
+    return next(iter(indices)) if len(indices) == 1 else None
+
+
+def _lifecycle_record_proposals(
+    original: _LifecycleTableRecord,
+    recompiled: _LifecycleTableRecord,
+) -> list[tuple[ReccmpEntity, ReccmpEntity, str]] | None:
+    """Validate a table-record association and return its unmatched pairs."""
+
+    owner_unit = _lifecycle_record_owner(recompiled)
+    if owner_unit is None:
+        return None
+
+    proposals: list[tuple[ReccmpEntity, ReccmpEntity, str]] = []
+    for routine_key, original_entity, recompiled_entity in (
+        ("initialization", original.initialization, recompiled.initialization),
+        ("finalization", original.finalization, recompiled.finalization),
+    ):
+        if (original_entity is None) != (recompiled_entity is None):
+            return None
+        if original_entity is None or recompiled_entity is None:
+            continue
+        if (
+            _lifecycle_routine_key(original_entity) != routine_key
+            or _lifecycle_routine_key(recompiled_entity) != routine_key
+        ):
+            return None
+        if original_entity.matched:
+            if original_entity.recomp_addr != recompiled_entity.recomp_addr:
+                return None
+            continue
+        if recompiled_entity.matched:
+            return None
+        original_owner = _lifecycle_original_owner(original_entity)
+        if (
+            not original_entity.get("library")
+            or not isinstance(original_owner, str)
+            or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(original_owner) is None
+            or not recompiled_entity.get("is_delphi")
+            or not isinstance(recompiled_entity.get("owner_unit"), str)
+            or recompiled_entity.get("owner_unit").casefold() != owner_unit.casefold()
+        ):
+            return None
+        canonical_routine = routine_key.title()
+        proposals.append(
+            (
+                original_entity,
+                recompiled_entity,
+                f"{owner_unit}.{canonical_routine}",
+            )
+        )
+
+    return proposals
+
+
+def _commit_lifecycle_function_proposals(
+    db: EntityDb,
+    proposals: list[tuple[ReccmpEntity, ReccmpEntity, str]],
+    report: ReccmpReportProtocol,
+    reason: str,
+) -> None:
+    with db.batch() as batch:
+        for original_entity, recompiled_entity, canonical_name in proposals:
+            assert original_entity.orig_addr is not None
+            assert recompiled_entity.recomp_addr is not None
+            batch.set(
+                ImageId.ORIG,
+                original_entity.orig_addr,
+                computed_name=canonical_name,
+                compiler_generated=True,
+            )
+            batch.match(original_entity.orig_addr, recompiled_entity.recomp_addr)
+
+    for original_entity, recompiled_entity, canonical_name in proposals:
+        assert original_entity.orig_addr is not None
+        assert recompiled_entity.recomp_addr is not None
+        report(
+            ReccmpEvent.GENERAL_WARNING,
+            original_entity.orig_addr,
+            msg=(
+                f"Matched Delphi lifecycle function '{canonical_name}' at "
+                f"0x{recompiled_entity.recomp_addr:x} from {reason}"
+            ),
+        )
+
+
+def _match_delphi_lifecycle_code_boundaries(
+    db: EntityDb,
+    original_table: tuple[_LifecycleTableRecord, ...],
+    recompiled_table: tuple[_LifecycleTableRecord, ...],
+    original_image: Image,
+    recompiled_image: Image,
+    report: ReccmpReportProtocol,
+) -> None:
+    """Match the first anonymous lifecycle record after a proven unit body."""
+
+    non_lifecycle_matches = sorted(
+        (
+            match
+            for match in db.get_functions()
+            if _lifecycle_routine_key(match) is None
+            and isinstance(match.get("owner_unit"), str)
+        ),
+        key=lambda match: match.orig_addr,
+    )
+    if not non_lifecycle_matches:
+        return
+    match_addresses = [match.orig_addr for match in non_lifecycle_matches]
+
+    recompiled_records_by_owner: defaultdict[str, list[_LifecycleTableRecord]] = (
+        defaultdict(list)
+    )
+    for record in recompiled_table:
+        owner_unit = _lifecycle_record_owner(record)
+        if owner_unit is not None:
+            recompiled_records_by_owner[owner_unit.casefold()].append(record)
+
+    original_records_by_gap: defaultdict[
+        tuple[int, int | None], list[tuple[int, _LifecycleTableRecord]]
+    ] = defaultdict(list)
+    for record in original_table:
+        entities = [
+            entity
+            for entity in (record.initialization, record.finalization)
+            if entity is not None
+        ]
+        if not entities or any(entity.matched for entity in entities):
+            continue
+        owners = {_lifecycle_original_owner(entity) for entity in entities}
+        if (
+            len(owners) != 1
+            or not isinstance(next(iter(owners)), str)
+            or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(next(iter(owners))) is None
+        ):
+            continue
+        code_start = min(
+            entity.orig_addr for entity in entities if entity.orig_addr is not None
+        )
+        code_end = max(
+            entity.orig_addr for entity in entities if entity.orig_addr is not None
+        )
+        insertion_index = bisect_left(match_addresses, code_start)
+        if insertion_index == 0:
+            continue
+        previous = non_lifecycle_matches[insertion_index - 1]
+        next_address = (
+            non_lifecycle_matches[insertion_index].orig_addr
+            if insertion_index < len(non_lifecycle_matches)
+            else None
+        )
+        if next_address is not None and code_end >= next_address:
+            continue
+        original_records_by_gap[(previous.orig_addr, next_address)].append(
+            (code_start, record)
+        )
+
+    proposals: list[tuple[ReccmpEntity, ReccmpEntity, str]] = []
+    for (previous_address, _), records in original_records_by_gap.items():
+        # Only the first lifecycle record can belong to the preceding unit.
+        _, original_record = min(records, key=lambda item: item[0])
+        previous = db.get(ImageId.ORIG, previous_address)
+        owner_unit = previous.get("owner_unit") if previous is not None else None
+        if not isinstance(owner_unit, str):
+            continue
+        candidates = recompiled_records_by_owner.get(owner_unit.casefold(), [])
+        if len(candidates) != 1:
+            continue
+        record_proposals = _lifecycle_record_proposals(original_record, candidates[0])
+        if record_proposals is None:
+            continue
+        if any(
+            not _is_executable_range(
+                original_image,
+                original_entity.orig_addr,
+                original_entity.size(ImageId.ORIG)
+                or original_entity.max_size(ImageId.ORIG)
+                or 0,
+            )
+            or not _is_executable_range(
+                recompiled_image,
+                recompiled_entity.recomp_addr,
+                recompiled_entity.size(ImageId.RECOMP)
+                or recompiled_entity.max_size(ImageId.RECOMP)
+                or 0,
+            )
+            for original_entity, recompiled_entity, _ in record_proposals
+        ):
+            continue
+        proposals.extend(record_proposals)
+
+    _commit_lifecycle_function_proposals(
+        db, proposals, report, "verified owning-unit code boundary"
+    )
+
+
+def _lifecycle_record_guard(
+    record: _LifecycleTableRecord,
+    image_id: ImageId,
+    image: Image,
+) -> int | None:
+    """Return the compiler guard shared by both routines in a table record."""
+
+    if record.initialization is None or record.finalization is None:
+        return None
+    initialization_guard, initialization_error = _unique_guard_update(
+        record.initialization,
+        image_id,
+        image,
+        _is_initialization_guard_update,
+    )
+    finalization_guard, finalization_error = _unique_guard_update(
+        record.finalization,
+        image_id,
+        image,
+        _is_finalization_guard_update,
+    )
+    if (
+        initialization_error is not None
+        or finalization_error is not None
+        or initialization_guard != finalization_guard
+        or initialization_guard is None
+        or not _is_writable_data_address(image, initialization_guard)
+    ):
+        return None
+    return initialization_guard
+
+
+def _match_delphi_lifecycle_data_layout(
+    db: EntityDb,
+    original_table: tuple[_LifecycleTableRecord, ...],
+    recompiled_table: tuple[_LifecycleTableRecord, ...],
+    original_image: Image,
+    recompiled_image: Image,
+    report: ReccmpReportProtocol,
+) -> None:
+    """Associate anonymous records through a stable compiler-guard span.
+
+    Matched lifecycle guards are DATA-layout anchors.  An intervening original
+    guard is projected only when its immediate matched guard neighbours have
+    the same displacement and exactly one unmatched rebuilt lifecycle record
+    references the projected writable DWORD.  This recovers unit identity
+    without depending on IDR's anonymous ``UnitNN`` label or a build-specific
+    TD32 guard name.
+    """
+
+    recompiled_record_by_function: dict[int, int] = {}
+    for index, record in enumerate(recompiled_table):
+        for entity in (record.initialization, record.finalization):
+            if entity is not None and entity.recomp_addr is not None:
+                recompiled_record_by_function[entity.recomp_addr] = index
+
+    guard_anchors: list[tuple[int, int]] = []
+    for original_record in original_table:
+        recompiled_index = _lifecycle_record_match_index(
+            original_record, recompiled_record_by_function
+        )
+        if recompiled_index is None:
+            continue
+        original_guard = _lifecycle_record_guard(
+            original_record, ImageId.ORIG, original_image
+        )
+        recompiled_guard = _lifecycle_record_guard(
+            recompiled_table[recompiled_index],
+            ImageId.RECOMP,
+            recompiled_image,
+        )
+        if original_guard is not None and recompiled_guard is not None:
+            guard_anchors.append((original_guard, recompiled_guard))
+    guard_anchors.sort()
+    if len(guard_anchors) < 2:
+        return
+    anchor_addresses = [original_guard for original_guard, _ in guard_anchors]
+
+    recompiled_records_by_guard: defaultdict[int, list[_LifecycleTableRecord]] = (
+        defaultdict(list)
+    )
+    for record in recompiled_table:
+        if any(
+            entity is not None and entity.matched
+            for entity in (record.initialization, record.finalization)
+        ):
+            continue
+        guard = _lifecycle_record_guard(record, ImageId.RECOMP, recompiled_image)
+        if guard is not None:
+            recompiled_records_by_guard[guard].append(record)
+
+    proposals: list[tuple[ReccmpEntity, ReccmpEntity, str]] = []
+    proposed_recompiled: set[int] = set()
+    for original_record in original_table:
+        entities = [
+            entity
+            for entity in (original_record.initialization, original_record.finalization)
+            if entity is not None
+        ]
+        if not entities or any(entity.matched for entity in entities):
+            continue
+        owners = {_lifecycle_original_owner(entity) for entity in entities}
+        if (
+            len(owners) != 1
+            or not isinstance(next(iter(owners)), str)
+            or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(next(iter(owners))) is None
+        ):
+            continue
+
+        original_guard = _lifecycle_record_guard(
+            original_record, ImageId.ORIG, original_image
+        )
+        if original_guard is None:
+            continue
+        insertion_index = bisect_left(anchor_addresses, original_guard)
+        if insertion_index == 0 or insertion_index == len(guard_anchors):
+            continue
+        previous_original, previous_recompiled = guard_anchors[insertion_index - 1]
+        following_original, following_recompiled = guard_anchors[insertion_index]
+        previous_displacement = previous_recompiled - previous_original
+        following_displacement = following_recompiled - following_original
+        if previous_displacement != following_displacement:
+            continue
+
+        projected_guard = original_guard + previous_displacement
+        if not previous_recompiled < projected_guard < following_recompiled:
+            continue
+        candidates = recompiled_records_by_guard.get(projected_guard, [])
+        if len(candidates) != 1:
+            event = (
+                ReccmpEvent.AMBIGUOUS_MATCH
+                if len(candidates) > 1
+                else ReccmpEvent.GENERAL_WARNING
+            )
+            report(
+                event,
+                entities[0].orig_addr,
+                msg=(
+                    "Rejected Delphi lifecycle DATA projection: "
+                    f"found {len(candidates)} rebuilt records at guard 0x{projected_guard:x}"
+                ),
+            )
+            continue
+
+        record_proposals = _lifecycle_record_proposals(original_record, candidates[0])
+        if record_proposals is None:
+            continue
+        if any(
+            recompiled_entity.recomp_addr in proposed_recompiled
+            or not _is_executable_range(
+                original_image,
+                original_entity.orig_addr,
+                original_entity.size(ImageId.ORIG)
+                or original_entity.max_size(ImageId.ORIG)
+                or 0,
+            )
+            or not _is_executable_range(
+                recompiled_image,
+                recompiled_entity.recomp_addr,
+                recompiled_entity.size(ImageId.RECOMP)
+                or recompiled_entity.max_size(ImageId.RECOMP)
+                or 0,
+            )
+            for original_entity, recompiled_entity, _ in record_proposals
+        ):
+            continue
+        proposals.extend(record_proposals)
+        proposed_recompiled.update(
+            recompiled_entity.recomp_addr
+            for _, recompiled_entity, _ in record_proposals
+        )
+
+    _commit_lifecycle_function_proposals(
+        db, proposals, report, "stable lifecycle-guard DATA layout"
+    )
+
+
+def match_delphi_lifecycle_functions(
+    db: EntityDb,
+    original_image: Image,
+    recompiled_image: Image,
+    report: ReccmpReportProtocol = reccmp_report_nop,
+):
+    """Associate anonymous compiler lifecycle routines through unit tables.
+
+    Already matched lifecycle records are exact anchors in each image's
+    compiler-emitted unit table.  An anonymous record is associated only when
+    it occupies the same ordinal in an equal-length span bounded by anchors
+    that are consecutive in both table orders.  This intentionally rejects
+    inserted, removed, or reordered unit spans.
+    """
+
+    original_table = _find_delphi_lifecycle_table(db, ImageId.ORIG, original_image)
+    recompiled_table = _find_delphi_lifecycle_table(
+        db, ImageId.RECOMP, recompiled_image
+    )
+    if original_table is None or recompiled_table is None:
+        report(
+            ReccmpEvent.GENERAL_WARNING,
+            0,
+            msg="Skipped Delphi lifecycle function matching: unique unit table not found",
+        )
+        return
+
+    _match_delphi_lifecycle_code_boundaries(
+        db,
+        original_table,
+        recompiled_table,
+        original_image,
+        recompiled_image,
+        report,
+    )
+    _match_delphi_lifecycle_data_layout(
+        db,
+        original_table,
+        recompiled_table,
+        original_image,
+        recompiled_image,
+        report,
+    )
+    # Boundary matches become exact unit-table anchors for the stable-span pass.
+    original_table = _find_delphi_lifecycle_table(db, ImageId.ORIG, original_image)
+    recompiled_table = _find_delphi_lifecycle_table(
+        db, ImageId.RECOMP, recompiled_image
+    )
+    assert original_table is not None and recompiled_table is not None
+
+    recompiled_record_by_function: dict[int, int] = {}
+    for index, record in enumerate(recompiled_table):
+        for entity in (record.initialization, record.finalization):
+            if entity is not None and entity.recomp_addr is not None:
+                recompiled_record_by_function[entity.recomp_addr] = index
+
+    anchor_by_original: dict[int, int] = {}
+    for index, record in enumerate(original_table):
+        recompiled_index = _lifecycle_record_match_index(
+            record, recompiled_record_by_function
+        )
+        if recompiled_index is not None:
+            anchor_by_original[index] = recompiled_index
+
+    proposals: list[tuple[ReccmpEntity, ReccmpEntity, str]] = []
+    proposed_originals: set[int] = set()
+    proposed_recompiled: set[int] = set()
+
+    def stage_record(original_index: int, recompiled_index: int) -> None:
+        record_proposals = _lifecycle_record_proposals(
+            original_table[original_index], recompiled_table[recompiled_index]
+        )
+        if record_proposals is None:
+            return
+        for original_entity, recompiled_entity, canonical_name in record_proposals:
+            assert original_entity.orig_addr is not None
+            assert recompiled_entity.recomp_addr is not None
+            original_size = (
+                original_entity.size(ImageId.ORIG)
+                or original_entity.max_size(ImageId.ORIG)
+                or 0
+            )
+            recompiled_size = (
+                recompiled_entity.size(ImageId.RECOMP)
+                or recompiled_entity.max_size(ImageId.RECOMP)
+                or 0
+            )
+            if (
+                original_entity.orig_addr in proposed_originals
+                or recompiled_entity.recomp_addr in proposed_recompiled
+                or not _is_executable_range(
+                    original_image, original_entity.orig_addr, original_size
+                )
+                or not _is_executable_range(
+                    recompiled_image, recompiled_entity.recomp_addr, recompiled_size
+                )
+            ):
+                return
+        for original_entity, recompiled_entity, canonical_name in record_proposals:
+            assert original_entity.orig_addr is not None
+            assert recompiled_entity.recomp_addr is not None
+            proposals.append((original_entity, recompiled_entity, canonical_name))
+            proposed_originals.add(original_entity.orig_addr)
+            proposed_recompiled.add(recompiled_entity.recomp_addr)
+
+    # If one half of an anchored record was already matched, the same table
+    # record proves the other half without needing a surrounding span.
+    for original_index, recompiled_index in anchor_by_original.items():
+        stage_record(original_index, recompiled_index)
+
+    original_anchors = sorted(anchor_by_original.items())
+    recompiled_anchor_order = {
+        anchor: rank
+        for rank, anchor in enumerate(
+            sorted(original_anchors, key=lambda item: item[1])
+        )
+    }
+    for left, right in zip(original_anchors, original_anchors[1:]):
+        original_left, recompiled_left = left
+        original_right, recompiled_right = right
+        if (
+            recompiled_anchor_order[right] != recompiled_anchor_order[left] + 1
+            or original_right - original_left != recompiled_right - recompiled_left
+            or original_right <= original_left + 1
+        ):
+            continue
+        for original_index, recompiled_index in zip(
+            range(original_left + 1, original_right),
+            range(recompiled_left + 1, recompiled_right),
+        ):
+            stage_record(original_index, recompiled_index)
+
+    _commit_lifecycle_function_proposals(
+        db, proposals, report, "anchored unit-table order"
+    )
 
 
 def _lifecycle_identity(match: ReccmpMatch) -> tuple[str, str] | None:
@@ -940,7 +1993,9 @@ def _is_writable_data_address(image: Image, address: int) -> bool:
         return False
 
     flags = sections[0].flags
-    return bool(flags & ImageSectionFlags.WRITE) and not bool(flags & ImageSectionFlags.EXECUTE)
+    return bool(flags & ImageSectionFlags.WRITE) and not bool(
+        flags & ImageSectionFlags.EXECUTE
+    )
 
 
 def _has_guard_match_conflict(
@@ -988,8 +2043,8 @@ def match_delphi_lifecycle_guards(
     image. The TD32 raw name is deliberately irrelevant to this inference.
     """
 
-    lifecycle_functions: defaultdict[str, dict[str, list[tuple[str, ReccmpMatch]]]] = defaultdict(
-        lambda: {"initialization": [], "finalization": []}
+    lifecycle_functions: defaultdict[str, dict[str, list[tuple[str, ReccmpMatch]]]] = (
+        defaultdict(lambda: {"initialization": [], "finalization": []})
     )
 
     for match in db.get_functions():
@@ -998,7 +2053,9 @@ def match_delphi_lifecycle_guards(
             continue
 
         owner_unit, routine_key = identity
-        lifecycle_functions[owner_unit.casefold()][routine_key].append((owner_unit, match))
+        lifecycle_functions[owner_unit.casefold()][routine_key].append(
+            (owner_unit, match)
+        )
 
     for unit_key, routines in lifecycle_functions.items():
         initializations = routines["initialization"]
@@ -1019,7 +2076,8 @@ def match_delphi_lifecycle_guards(
         initialization = initializations[0][1]
         finalization = finalizations[0][1]
         if any(
-            routine.get("owner_unit") is None or routine.get("owner_unit").casefold() != unit_key
+            routine.get("owner_unit") is None
+            or routine.get("owner_unit").casefold() != unit_key
             for routine in (initialization, finalization)
         ):
             _report_skip(
@@ -1051,7 +2109,11 @@ def match_delphi_lifecycle_guards(
                 _is_finalization_guard_update,
             )
             if init_error is not None or final_error is not None:
-                reason = f"initialization {init_error}" if init_error is not None else f"finalization {final_error}"
+                reason = (
+                    f"initialization {init_error}"
+                    if init_error is not None
+                    else f"finalization {final_error}"
+                )
                 _report_skip(
                     report,
                     finalization.orig_addr,
@@ -1091,7 +2153,9 @@ def match_delphi_lifecycle_guards(
         recompiled_guard = guards[ImageId.RECOMP]
         original_entity = db.get(ImageId.ORIG, original_guard)
         recompiled_entity = db.get(ImageId.RECOMP, recompiled_guard)
-        if _has_guard_match_conflict(original_entity, ImageId.ORIG, recompiled_guard) or _has_guard_match_conflict(
+        if _has_guard_match_conflict(
+            original_entity, ImageId.ORIG, recompiled_guard
+        ) or _has_guard_match_conflict(
             recompiled_entity, ImageId.RECOMP, original_guard
         ):
             _report_skip(

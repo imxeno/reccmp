@@ -34,6 +34,8 @@ from .match_msvc import (
     match_imports,
 )
 from .match_delphi import (
+    match_delphi_compiler_startup_functions,
+    match_delphi_lifecycle_functions,
     match_delphi_library_layout,
     match_delphi_library_functions,
     match_delphi_lifecycle_guards,
@@ -194,6 +196,26 @@ class Compare:
         for img_id in (ImageId.ORIG, ImageId.RECOMP):
             set_max_size(self._db, img_id)
 
+        match_delphi_compiler_startup_functions(self._db, self.report)
+
+        match_delphi_library_layout(
+            self._db,
+            self.orig_bin,
+            self.recomp_bin,
+            self.report,
+        )
+
+        match_delphi_lifecycle_functions(
+            self._db,
+            self.orig_bin,
+            self.recomp_bin,
+            self.report,
+        )
+
+        # Lifecycle recovery proves semantic owners for anonymous IDR UnitNN
+        # records. Re-run the library passes so nested/static boundaries in
+        # those units can use that ownership evidence.
+        match_delphi_library_functions(self._db, self.report)
         match_delphi_library_layout(
             self._db,
             self.orig_bin,
