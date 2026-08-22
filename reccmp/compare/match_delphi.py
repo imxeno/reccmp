@@ -1,5 +1,7 @@
 """Structural matching for Delphi compiler and library entities."""
 
+# pylint: disable=too-many-lines
+
 from collections import defaultdict
 from collections.abc import Callable
 from bisect import bisect_left
@@ -43,6 +45,18 @@ DELPHI_COMPILER_STARTUP_ROUTINES = frozenset(
 )
 
 
+def _original_address(entity: ReccmpEntity) -> int:
+    address = entity.orig_addr
+    assert address is not None
+    return address
+
+
+def _recompiled_address(entity: ReccmpEntity) -> int:
+    address = entity.recomp_addr
+    assert address is not None
+    return address
+
+
 def _anonymous_delphi_unit_key(name: str) -> int | None:
     if ANONYMOUS_DELPHI_UNIT_RE.fullmatch(name) is None:
         return None
@@ -56,7 +70,7 @@ def _anonymous_delphi_unit_aliases(db: EntityDb) -> dict[int, str]:
     for entity in db.all(ImageId.ORIG):
         raw_name = entity.name
         best_name = entity.best_name()
-        if (
+        if (  # pylint: disable=too-many-boolean-expressions
             not entity.matched
             or not isinstance(raw_name, str)
             or not isinstance(best_name, str)
@@ -252,8 +266,12 @@ def _match_delphi_library_overload_order(
         candidates = recompiled_groups.get(key, [])
         if len(originals) != len(candidates) or len(originals) < 2:
             continue
-        originals.sort(key=lambda entity: entity.orig_addr)
-        candidates.sort(key=lambda entity: entity.recomp_addr)
+        originals.sort(key=_original_address)
+        candidates.sort(key=_recompiled_address)
+        first_original_address = _original_address(originals[0])
+        last_original_address = _original_address(originals[-1])
+        first_recompiled_address = _recompiled_address(candidates[0])
+        last_recompiled_address = _recompiled_address(candidates[-1])
         owner_key = key.split(".", 1)[0]
         anchors = _matched_delphi_library_anchors(db, owner_key)
 
@@ -265,30 +283,28 @@ def _match_delphi_library_overload_order(
             return 0
 
         if any(
-            position(anchor.orig_addr, originals[0].orig_addr, originals[-1].orig_addr)
+            position(anchor.orig_addr, first_original_address, last_original_address)
             != position(
                 anchor.recomp_addr,
-                candidates[0].recomp_addr,
-                candidates[-1].recomp_addr,
+                first_recompiled_address,
+                last_recompiled_address,
             )
             for anchor in anchors
         ):
             continue
         original_before = [
-            anchor for anchor in anchors if anchor.orig_addr < originals[0].orig_addr
+            anchor for anchor in anchors if anchor.orig_addr < first_original_address
         ]
         original_after = [
-            anchor for anchor in anchors if anchor.orig_addr > originals[-1].orig_addr
+            anchor for anchor in anchors if anchor.orig_addr > last_original_address
         ]
         recompiled_before = [
             anchor
             for anchor in anchors
-            if anchor.recomp_addr < candidates[0].recomp_addr
+            if anchor.recomp_addr < first_recompiled_address
         ]
         recompiled_after = [
-            anchor
-            for anchor in anchors
-            if anchor.recomp_addr > candidates[-1].recomp_addr
+            anchor for anchor in anchors if anchor.recomp_addr > last_recompiled_address
         ]
         if not all(
             (original_before, original_after, recompiled_before, recompiled_after)
@@ -306,7 +322,7 @@ def _match_delphi_library_overload_order(
             pairs.append((original.orig_addr, candidate.recomp_addr))
         report(
             ReccmpEvent.GENERAL_WARNING,
-            originals[0].orig_addr,
+            first_original_address,
             msg=f"Matched Delphi overload group '{key}' by verified anchored source order",
         )
     db.bulk_match(pairs)
@@ -685,8 +701,7 @@ def _library_candidate_at(
     valid = (
         containing is not None
         and containing.recomp_addr is not None
-        and containing.recomp_addr < address
-        and address <= containing.recomp_addr + containing_size
+        and containing.recomp_addr < address <= containing.recomp_addr + containing_size
         and containing.get("is_delphi")
         and isinstance(containing_owner, str)
         and containing_owner.casefold() == owner_key
@@ -730,7 +745,7 @@ def _apply_library_boundary_proposals(
             previous_owner = (
                 previous.get("owner_unit") if previous is not None else None
             )
-            if (
+            if (  # pylint: disable=too-many-boolean-expressions
                 previous is not None
                 and previous.recomp_addr is not None
                 and previous.recomp_addr < recompiled_address
@@ -901,7 +916,7 @@ def _split_overlapping_delphi_library_ranges(db: EntityDb):
 
                 size = match.size(image_id) or 0
                 boundary_size = next_address - address
-                if boundary_size > 0 and size > boundary_size:
+                if 0 < boundary_size < size:
                     batch.set(image_id, address, size=boundary_size)
 
 
@@ -1019,7 +1034,7 @@ def _match_delphi_library_fingerprints(
     original_image: Image,
     recompiled_image: Image,
     report: ReccmpReportProtocol,
-):  # pylint: disable=too-many-locals
+):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Find layout-break boundaries by unique, unit-scoped code shape."""
 
     anonymous_unit_aliases = _anonymous_delphi_unit_aliases(db)
@@ -1392,6 +1407,7 @@ def _lifecycle_record_match_index(
     return next(iter(indices)) if len(indices) == 1 else None
 
 
+# pylint: disable-next=too-many-return-statements
 def _lifecycle_record_proposals(
     original: _LifecycleTableRecord,
     recompiled: _LifecycleTableRecord,
@@ -1423,7 +1439,7 @@ def _lifecycle_record_proposals(
         if recompiled_entity.matched:
             return None
         original_owner = _lifecycle_original_owner(original_entity)
-        if (
+        if (  # pylint: disable=too-many-boolean-expressions
             not original_entity.get("library")
             or not isinstance(original_owner, str)
             or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(original_owner) is None
@@ -1475,6 +1491,7 @@ def _commit_lifecycle_function_proposals(
         )
 
 
+# pylint: disable-next=too-many-positional-arguments
 def _match_delphi_lifecycle_code_boundaries(
     db: EntityDb,
     original_table: tuple[_LifecycleTableRecord, ...],
@@ -1518,10 +1535,12 @@ def _match_delphi_lifecycle_code_boundaries(
         if not entities or any(entity.matched for entity in entities):
             continue
         owners = {_lifecycle_original_owner(entity) for entity in entities}
+        if len(owners) != 1:
+            continue
+        original_owner = next(iter(owners))
         if (
-            len(owners) != 1
-            or not isinstance(next(iter(owners)), str)
-            or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(next(iter(owners))) is None
+            not isinstance(original_owner, str)
+            or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(original_owner) is None
         ):
             continue
         code_start = min(
@@ -1549,8 +1568,10 @@ def _match_delphi_lifecycle_code_boundaries(
     for (previous_address, _), records in original_records_by_gap.items():
         # Only the first lifecycle record can belong to the preceding unit.
         _, original_record = min(records, key=lambda item: item[0])
-        previous = db.get(ImageId.ORIG, previous_address)
-        owner_unit = previous.get("owner_unit") if previous is not None else None
+        previous_entity = db.get(ImageId.ORIG, previous_address)
+        owner_unit = (
+            previous_entity.get("owner_unit") if previous_entity is not None else None
+        )
         if not isinstance(owner_unit, str):
             continue
         candidates = recompiled_records_by_owner.get(owner_unit.casefold(), [])
@@ -1562,14 +1583,14 @@ def _match_delphi_lifecycle_code_boundaries(
         if any(
             not _is_executable_range(
                 original_image,
-                original_entity.orig_addr,
+                _original_address(original_entity),
                 original_entity.size(ImageId.ORIG)
                 or original_entity.max_size(ImageId.ORIG)
                 or 0,
             )
             or not _is_executable_range(
                 recompiled_image,
-                recompiled_entity.recomp_addr,
+                _recompiled_address(recompiled_entity),
                 recompiled_entity.size(ImageId.RECOMP)
                 or recompiled_entity.max_size(ImageId.RECOMP)
                 or 0,
@@ -1616,6 +1637,7 @@ def _lifecycle_record_guard(
     return initialization_guard
 
 
+# pylint: disable-next=too-many-positional-arguments,too-many-locals
 def _match_delphi_lifecycle_data_layout(
     db: EntityDb,
     original_table: tuple[_LifecycleTableRecord, ...],
@@ -1686,10 +1708,12 @@ def _match_delphi_lifecycle_data_layout(
         if not entities or any(entity.matched for entity in entities):
             continue
         owners = {_lifecycle_original_owner(entity) for entity in entities}
+        if len(owners) != 1:
+            continue
+        original_owner = next(iter(owners))
         if (
-            len(owners) != 1
-            or not isinstance(next(iter(owners)), str)
-            or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(next(iter(owners))) is None
+            not isinstance(original_owner, str)
+            or ANONYMOUS_DELPHI_UNIT_RE.fullmatch(original_owner) is None
         ):
             continue
 
@@ -1720,7 +1744,7 @@ def _match_delphi_lifecycle_data_layout(
             )
             report(
                 event,
-                entities[0].orig_addr,
+                _original_address(entities[0]),
                 msg=(
                     "Rejected Delphi lifecycle DATA projection: "
                     f"found {len(candidates)} rebuilt records at guard 0x{projected_guard:x}"
@@ -1732,17 +1756,17 @@ def _match_delphi_lifecycle_data_layout(
         if record_proposals is None:
             continue
         if any(
-            recompiled_entity.recomp_addr in proposed_recompiled
+            _recompiled_address(recompiled_entity) in proposed_recompiled
             or not _is_executable_range(
                 original_image,
-                original_entity.orig_addr,
+                _original_address(original_entity),
                 original_entity.size(ImageId.ORIG)
                 or original_entity.max_size(ImageId.ORIG)
                 or 0,
             )
             or not _is_executable_range(
                 recompiled_image,
-                recompiled_entity.recomp_addr,
+                _recompiled_address(recompiled_entity),
                 recompiled_entity.size(ImageId.RECOMP)
                 or recompiled_entity.max_size(ImageId.RECOMP)
                 or 0,
@@ -1752,7 +1776,7 @@ def _match_delphi_lifecycle_data_layout(
             continue
         proposals.extend(record_proposals)
         proposed_recompiled.update(
-            recompiled_entity.recomp_addr
+            _recompiled_address(recompiled_entity)
             for _, recompiled_entity, _ in record_proposals
         )
 
@@ -1948,7 +1972,7 @@ def _is_initialization_guard_update(instruction) -> int | None:
 
 
 def _unique_guard_update(
-    match: ReccmpMatch,
+    match: ReccmpEntity,
     image_id: ImageId,
     image: Image,
     predicate: Callable,

@@ -1,11 +1,13 @@
 """Tests for matching Delphi names and VMTs across analysis sources."""
 
+# pylint: disable=too-many-lines
+
 import struct
 from unittest.mock import Mock
 
 import pytest
 
-from reccmp.compare.db import EntityDb
+from reccmp.compare.db import EntityDb, ReccmpEntity
 from reccmp.compare.event import ReccmpEvent, ReccmpReportProtocol
 from reccmp.compare.match_delphi import (
     match_delphi_compiler_startup_functions,
@@ -28,6 +30,12 @@ from .raw_image import RawImage
 @pytest.fixture(name="db")
 def fixture_db() -> EntityDb:
     return EntityDb()
+
+
+def _get_entity(db: EntityDb, image_id: ImageId, address: int) -> ReccmpEntity:
+    entity = db.get(image_id, address)
+    assert entity is not None
+    return entity
 
 
 def _lifecycle_image(
@@ -89,18 +97,12 @@ def _add_lifecycle_pair(
 ):
     with db.batch() as batch:
         for image_id in (ImageId.ORIG, ImageId.RECOMP):
-            delphi_attributes = (
-                {"owner_unit": owner_unit, "is_delphi": True}
-                if image_id == ImageId.RECOMP
-                else {}
-            )
             batch.set(
                 image_id,
                 0x10,
                 name=f"{owner_unit}.Initialization",
                 type=EntityType.FUNCTION,
                 size=initialization_size,
-                **delphi_attributes,
             )
             batch.set(
                 image_id,
@@ -108,8 +110,20 @@ def _add_lifecycle_pair(
                 name=f"{owner_unit}.Finalization",
                 type=EntityType.FUNCTION,
                 size=finalization_size,
-                **delphi_attributes,
             )
+            if image_id == ImageId.RECOMP:
+                batch.set(
+                    image_id,
+                    0x10,
+                    owner_unit=owner_unit,
+                    is_delphi=True,
+                )
+                batch.set(
+                    image_id,
+                    0x40,
+                    owner_unit=owner_unit,
+                    is_delphi=True,
+                )
         batch.match(0x10, 0x10)
         batch.match(0x40, 0x40)
 
@@ -231,14 +245,14 @@ def test_match_anonymous_delphi_lifecycle_functions_from_anchored_unit_table(
         db,
         ImageId.ORIG,
         original_records,
-        ("AnchorA", "Unit100", "Unit101", "AnchorD"),
+        ("AnchorA", "Unit100", "Unit101", "FinalAnchor"),
         anonymous=True,
     )
     _add_lifecycle_table_entities(
         db,
         ImageId.RECOMP,
         recompiled_records,
-        ("AnchorA", "RealOne", "RealTwo", "AnchorD"),
+        ("AnchorA", "RealOne", "RealTwo", "FinalAnchor"),
         anonymous=False,
     )
     with db.batch() as batch:
@@ -251,12 +265,12 @@ def test_match_anonymous_delphi_lifecycle_functions_from_anchored_unit_table(
 
     match_delphi_lifecycle_functions(db, original, recompiled)
 
-    assert db.get(ImageId.ORIG, 0x20).recomp_addr == 0x60
-    assert db.get(ImageId.ORIG, 0x24).recomp_addr == 0x64
-    assert db.get(ImageId.ORIG, 0x20).best_name() == "RealOne.Initialization"
-    assert db.get(ImageId.ORIG, 0x24).best_name() == "RealOne.Finalization"
-    assert db.get(ImageId.ORIG, 0x30).recomp_addr == 0x70
-    assert db.get(ImageId.ORIG, 0x34).recomp_addr == 0x74
+    assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr == 0x60
+    assert _get_entity(db, ImageId.ORIG, 0x24).recomp_addr == 0x64
+    assert _get_entity(db, ImageId.ORIG, 0x20).best_name() == "RealOne.Initialization"
+    assert _get_entity(db, ImageId.ORIG, 0x24).best_name() == "RealOne.Finalization"
+    assert _get_entity(db, ImageId.ORIG, 0x30).recomp_addr == 0x70
+    assert _get_entity(db, ImageId.ORIG, 0x34).recomp_addr == 0x74
 
 
 def test_match_anonymous_delphi_lifecycle_functions_rejects_changed_unit_span(
@@ -281,14 +295,14 @@ def test_match_anonymous_delphi_lifecycle_functions_rejects_changed_unit_span(
         db,
         ImageId.ORIG,
         original_records,
-        ("AnchorA", "Unit100", "Unit101", "AnchorD"),
+        ("AnchorA", "Unit100", "Unit101", "FinalAnchor"),
         anonymous=True,
     )
     _add_lifecycle_table_entities(
         db,
         ImageId.RECOMP,
         recompiled_records,
-        ("AnchorA", "RealOne", "Inserted", "RealTwo", "AnchorD"),
+        ("AnchorA", "RealOne", "Inserted", "RealTwo", "FinalAnchor"),
         anonymous=False,
     )
     with db.batch() as batch:
@@ -301,10 +315,10 @@ def test_match_anonymous_delphi_lifecycle_functions_rejects_changed_unit_span(
 
     match_delphi_lifecycle_functions(db, original, recompiled)
 
-    assert db.get(ImageId.ORIG, 0x20).recomp_addr is None
-    assert db.get(ImageId.ORIG, 0x24).recomp_addr is None
-    assert db.get(ImageId.ORIG, 0x30).recomp_addr is None
-    assert db.get(ImageId.ORIG, 0x34).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x24).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x30).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x34).recomp_addr is None
 
 
 @pytest.mark.parametrize("following_recompiled_guard", [0x370, 0x374])
@@ -383,8 +397,8 @@ def test_match_anonymous_delphi_lifecycle_functions_from_stable_guard_layout(
     match_delphi_lifecycle_functions(db, original, recompiled)
 
     expected = 0xD0 if following_recompiled_guard == 0x370 else None
-    assert db.get(ImageId.ORIG, 0x30).recomp_addr == expected
-    assert db.get(ImageId.ORIG, 0x38).recomp_addr == (
+    assert _get_entity(db, ImageId.ORIG, 0x30).recomp_addr == expected
+    assert _get_entity(db, ImageId.ORIG, 0x38).recomp_addr == (
         0xD8 if expected is not None else None
     )
 
@@ -594,8 +608,8 @@ def test_match_delphi_library_function_rejects_wrong_suffix_and_application(
 
     match_delphi_library_functions(db)
 
-    assert db.get(ImageId.ORIG, 0x12345678).recomp_addr is None
-    assert db.get(ImageId.ORIG, 0x2000).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x12345678).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x2000).recomp_addr is None
 
 
 def test_match_delphi_library_overloads_by_unique_positive_size(db: EntityDb):
@@ -622,8 +636,8 @@ def test_match_delphi_library_overloads_by_unique_positive_size(db: EntityDb):
 
     match_delphi_library_functions(db)
 
-    assert db.get(ImageId.ORIG, 0x1000).recomp_addr == 0x5100
-    assert db.get(ImageId.ORIG, 0x1100).recomp_addr == 0x5000
+    assert _get_entity(db, ImageId.ORIG, 0x1000).recomp_addr == 0x5100
+    assert _get_entity(db, ImageId.ORIG, 0x1100).recomp_addr == 0x5000
 
 
 def test_match_delphi_library_reporting_signatures_join_overload_group(
@@ -655,8 +669,8 @@ def test_match_delphi_library_reporting_signatures_join_overload_group(
 
     match_delphi_library_functions(db)
 
-    assert db.get(ImageId.ORIG, 0x1000).recomp_addr == 0x5100
-    assert db.get(ImageId.ORIG, 0x1100).recomp_addr == 0x5000
+    assert _get_entity(db, ImageId.ORIG, 0x1000).recomp_addr == 0x5100
+    assert _get_entity(db, ImageId.ORIG, 0x1100).recomp_addr == 0x5000
 
 
 @pytest.mark.parametrize("conflicting_anchor", [False, True])
@@ -732,8 +746,8 @@ def test_match_delphi_library_overloads_by_verified_anchored_order(
     match_delphi_library_functions(db)
 
     expected = None if conflicting_anchor else 0x5000
-    assert db.get(ImageId.ORIG, 0x1000).recomp_addr == expected
-    assert db.get(ImageId.ORIG, 0x1100).recomp_addr == (
+    assert _get_entity(db, ImageId.ORIG, 0x1000).recomp_addr == expected
+    assert _get_entity(db, ImageId.ORIG, 0x1100).recomp_addr == (
         None if conflicting_anchor else 0x5100
     )
 
@@ -770,7 +784,7 @@ def test_match_delphi_nested_function_with_flattened_td32_name(
 
     match_delphi_library_functions(db)
 
-    assert db.get(ImageId.ORIG, 0x1100).recomp_addr == (
+    assert _get_entity(db, ImageId.ORIG, 0x1100).recomp_addr == (
         None if duplicate_candidate else 0x5000
     )
 
@@ -806,8 +820,12 @@ def test_match_delphi_compiler_startup_unit_to_sysinit(db: EntityDb, wrong_size:
 
     match_delphi_compiler_startup_functions(db)
 
-    assert db.get(ImageId.ORIG, 0x1000).recomp_addr == (None if wrong_size else 0x5000)
-    assert db.get(ImageId.ORIG, 0x1100).recomp_addr == (None if wrong_size else 0x5100)
+    assert _get_entity(db, ImageId.ORIG, 0x1000).recomp_addr == (
+        None if wrong_size else 0x5000
+    )
+    assert _get_entity(db, ImageId.ORIG, 0x1100).recomp_addr == (
+        None if wrong_size else 0x5100
+    )
 
 
 def test_exact_match_defers_ambiguous_delphi_library_group_to_size_pass(
@@ -834,10 +852,10 @@ def test_exact_match_defers_ambiguous_delphi_library_group_to_size_pass(
             )
 
     match_functions(db)
-    assert db.get(ImageId.ORIG, 0x1000).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x1000).recomp_addr is None
 
     match_delphi_library_functions(db)
-    assert db.get(ImageId.ORIG, 0x1000).recomp_addr == 0x5100
+    assert _get_entity(db, ImageId.ORIG, 0x1000).recomp_addr == 0x5100
 
 
 def test_match_delphi_library_overload_ambiguity_is_reported(db: EntityDb):
@@ -865,8 +883,8 @@ def test_match_delphi_library_overload_ambiguity_is_reported(db: EntityDb):
 
     match_delphi_library_functions(db, report)
 
-    assert db.get(ImageId.ORIG, 0x1000).recomp_addr is None
-    assert db.get(ImageId.ORIG, 0x1100).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x1000).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x1100).recomp_addr is None
     report.assert_called_once()
     assert report.call_args.args == (ReccmpEvent.AMBIGUOUS_MATCH, 0x1000)
 
@@ -998,10 +1016,10 @@ def test_match_delphi_library_boundary_uses_unique_fingerprint_after_layout_brea
 
     match_delphi_library_layout(db, original, recompiled)
 
-    assert db.get(ImageId.ORIG, 0x20).recomp_addr == 0x60
-    assert db.get(ImageId.ORIG, 0x10).size(ImageId.ORIG) == 0x10
-    assert db.get(ImageId.ORIG, 0x20).size(ImageId.ORIG) == 0x10
-    assert db.get(ImageId.RECOMP, 0x50).size(ImageId.RECOMP) == 0x10
+    assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr == 0x60
+    assert _get_entity(db, ImageId.ORIG, 0x10).size(ImageId.ORIG) == 0x10
+    assert _get_entity(db, ImageId.ORIG, 0x20).size(ImageId.ORIG) == 0x10
+    assert _get_entity(db, ImageId.RECOMP, 0x50).size(ImageId.RECOMP) == 0x10
     synthetic_boundary = db.get(ImageId.RECOMP, 0x60)
     assert synthetic_boundary is not None
     assert synthetic_boundary.size(ImageId.RECOMP) == 0x14
@@ -1023,7 +1041,7 @@ def test_match_delphi_library_boundary_rejects_conflicting_owner(db: EntityDb):
 
     match_delphi_library_layout(db, original, recompiled)
 
-    assert db.get(ImageId.ORIG, 0x20).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr is None
 
 
 def test_match_delphi_library_boundary_maps_parent_jump_alternate_entry(
@@ -1071,7 +1089,7 @@ def test_match_delphi_library_boundary_maps_parent_jump_alternate_entry(
 
     match_delphi_library_layout(db, original, recompiled)
 
-    assert db.get(ImageId.ORIG, 0x20).recomp_addr == 0x60
+    assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr == 0x60
 
 
 def test_match_delphi_library_boundary_uses_corresponding_first_parent_jump(
@@ -1118,7 +1136,7 @@ def test_match_delphi_library_boundary_uses_corresponding_first_parent_jump(
 
     match_delphi_library_layout(db, original, recompiled)
 
-    assert db.get(ImageId.ORIG, 0x20).recomp_addr == 0x60
+    assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr == 0x60
 
 
 @pytest.mark.parametrize("duplicate_fingerprint", [False, True])
@@ -1133,7 +1151,7 @@ def test_match_delphi_library_boundary_rejects_unsafe_fingerprint(
 
     match_delphi_library_layout(db, original, recompiled)
 
-    assert db.get(ImageId.ORIG, 0x20).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr is None
 
 
 def add_delphi_placeholder_span(

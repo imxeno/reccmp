@@ -1,5 +1,7 @@
 """Tests MSVC-specific match strategies"""
 
+# pylint: disable=too-many-lines
+
 import logging
 from unittest.mock import Mock, ANY, patch
 import pytest

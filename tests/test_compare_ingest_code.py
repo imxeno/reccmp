@@ -314,9 +314,9 @@ def test_load_delphi_nested_code_match_line(
 
                 implementation
 
-                // FUNCTION: TEST 0x1000
+                // FUNCTION: TEST 0x10038220
                 function Outer: Boolean;
-                  // NESTED: TEST 0x2000
+                  // NESTED: TEST 0x10038230
                   function Inner: Boolean;
                   begin
                     Result := False;
@@ -337,12 +337,12 @@ def test_load_delphi_nested_code_match_line(
         batch.set(ImageId.RECOMP, 0x5100)
     load_markers(files, lines_db, binfile, "TEST", db)
 
-    nested_entity = db.get(ImageId.ORIG, 0x2000)
+    nested_entity = db.get(ImageId.ORIG, 0x10038230)
     assert nested_entity is not None
     assert nested_entity.recomp_addr == 0x5000
     assert nested_entity.get("type") == EntityType.FUNCTION
 
-    outer_entity = db.get(ImageId.ORIG, 0x1000)
+    outer_entity = db.get(ImageId.ORIG, 0x10038220)
     assert outer_entity is not None
     assert outer_entity.recomp_addr == 0x5100
     assert outer_entity.get("type") == EntityType.FUNCTION

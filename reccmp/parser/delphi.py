@@ -298,7 +298,7 @@ class DelphiParser:
         name: str,
         end_line: int,
         lookup_by_name: bool = False,
-    ):
+    ):  # pylint: disable=too-many-positional-arguments
         for marker in markers.iter():
             name_is_symbol = (
                 marker.extra is not None and marker.extra.lower() == "symbol"
