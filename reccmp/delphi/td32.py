@@ -1587,8 +1587,22 @@ class DelphiTd32Analysis(CvdumpAnalysis):
             vtable_node.friendly_name = root_name or vtable_node.friendly_name
 
         self._apply_discovered_delphi_vmts(parser, node_by_key)
+        for node in node_by_key.values():
+            if node.node_type == EntityType.VTABLE:
+                self._apply_delphi_vmt_owner(node)
+
         self.nodes = [node for _, node in sorted(node_by_key.items())]
         self._estimate_size()
+
+    def _apply_delphi_vmt_owner(self, node: CvdumpNode):
+        owner_unit = self._owner_from_map(node)
+        if owner_unit is None:
+            return
+
+        node.owner_unit = owner_unit
+        name = node.name()
+        if name is not None and "." not in name:
+            node.friendly_name = f"{owner_unit}.{name}"
 
     def _apply_discovered_delphi_vmts(
         self,
@@ -1712,6 +1726,13 @@ class DelphiTd32Analysis(CvdumpAnalysis):
     ) -> str | None:
         for full_name, expected_size in class_infos:
             if expected_size in (None, instance_size):
+                return full_name
+
+        # Delphi 7 sometimes records the debug class type as one pointer larger
+        # than the runtime VMT instance-size field. Keep exact matches preferred
+        # and accept only this observed TD32 discrepancy.
+        for full_name, expected_size in class_infos:
+            if expected_size == instance_size + 4:
                 return full_name
 
         return None

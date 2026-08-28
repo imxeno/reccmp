@@ -1312,3 +1312,44 @@ def test_match_vtables_delphi_short_name_must_be_unique(db: EntityDb):
     match = db.get(ImageId.ORIG, 100)
     assert match is not None
     assert match.recomp_addr is None
+
+
+def test_match_vtables_delphi_duplicate_short_names_use_unit_qualification(
+    db: EntityDb,
+):
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            100,
+            name="Unit1.TWidget",
+            type=EntityType.VTABLE,
+        )
+        batch.set(
+            ImageId.ORIG,
+            110,
+            name="Unit2.TWidget",
+            type=EntityType.VTABLE,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            200,
+            name="Unit1.TWidget",
+            type=EntityType.VTABLE,
+            is_delphi=True,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            210,
+            name="Unit2.TWidget",
+            type=EntityType.VTABLE,
+            is_delphi=True,
+        )
+
+    match_vtables(db)
+
+    unit1_match = db.get(ImageId.ORIG, 100)
+    unit2_match = db.get(ImageId.ORIG, 110)
+    assert unit1_match is not None
+    assert unit2_match is not None
+    assert unit1_match.recomp_addr == 200
+    assert unit2_match.recomp_addr == 210

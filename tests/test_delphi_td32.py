@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 from reccmp.cvdump.analysis import CvdumpNode
 from reccmp.cvdump.cvinfo import CVInfoTypeEnum, CvdumpTypeKey
-from reccmp.delphi import DelphiTd32Analysis, DelphiTd32Parser, has_embedded_td32
+from reccmp.delphi import (
+    DelphiMapAnalysis,
+    DelphiTd32Analysis,
+    DelphiTd32Parser,
+    has_embedded_td32,
+)
 from reccmp.delphi.td32 import (
     Td32SourceRange,
     decode_td32_call_convention,
@@ -540,6 +545,88 @@ def test_discovered_delphi_vmt_uses_header_address():
     assert nodes[(1, 0x28)].friendly_name == "Unit1.TWidget"
     assert nodes[(1, 0x28)].confirmed_size == 0x50
     assert nodes[(1, 0x28)].vtable_prefix_size == 0x48
+
+
+def test_delphi_vmt_class_size_matching_prefers_exact_then_plus_four():
+    # pylint: disable=protected-access
+    analysis = object.__new__(DelphiTd32Analysis)
+
+    assert (
+        analysis._matching_delphi_class_name(
+            [("Unit1.TPlusFour", 20), ("Unit2.TExact", 16)], 16
+        )
+        == "Unit2.TExact"
+    )
+    assert (
+        analysis._matching_delphi_class_name([("Unit1.TPlusFour", 20)], 16)
+        == "Unit1.TPlusFour"
+    )
+    assert analysis._matching_delphi_class_name([("Unit1.TOther", 24)], 16) is None
+
+
+def test_delphi_vmt_owner_qualifies_short_name_from_map():
+    # pylint: disable=protected-access
+    owner_parser = SimpleNamespace(owner_unit_at=lambda section, offset: "Unit1")
+    analysis = object.__new__(DelphiTd32Analysis)
+    analysis._map_analysis = cast(
+        DelphiMapAnalysis, SimpleNamespace(parser=owner_parser)
+    )
+    node = CvdumpNode(section=1, offset=0x28)
+    node.node_type = EntityType.VTABLE
+    node.friendly_name = "TWidget"
+
+    analysis._apply_delphi_vmt_owner(node)
+
+    assert node.owner_unit == "Unit1"
+    assert node.friendly_name == "Unit1.TWidget"
+
+
+def test_delphi_vmt_owner_without_unambiguous_map_keeps_short_name():
+    # pylint: disable=protected-access
+    owner_parser = SimpleNamespace(owner_unit_at=lambda section, offset: None)
+    analysis = object.__new__(DelphiTd32Analysis)
+    analysis._map_analysis = cast(
+        DelphiMapAnalysis, SimpleNamespace(parser=owner_parser)
+    )
+    node = CvdumpNode(section=1, offset=0x28)
+    node.node_type = EntityType.VTABLE
+    node.friendly_name = "TWidget"
+
+    analysis._apply_delphi_vmt_owner(node)
+
+    assert node.owner_unit is None
+    assert node.friendly_name == "TWidget"
+
+
+def test_delphi_vmt_owner_without_map_keeps_short_name():
+    # pylint: disable=protected-access
+    analysis = object.__new__(DelphiTd32Analysis)
+    analysis._map_analysis = None
+    node = CvdumpNode(section=1, offset=0x28)
+    node.node_type = EntityType.VTABLE
+    node.friendly_name = "TWidget"
+
+    analysis._apply_delphi_vmt_owner(node)
+
+    assert node.owner_unit is None
+    assert node.friendly_name == "TWidget"
+
+
+def test_delphi_vmt_owner_does_not_replace_existing_qualification():
+    # pylint: disable=protected-access
+    owner_parser = SimpleNamespace(owner_unit_at=lambda section, offset: "Unit1")
+    analysis = object.__new__(DelphiTd32Analysis)
+    analysis._map_analysis = cast(
+        DelphiMapAnalysis, SimpleNamespace(parser=owner_parser)
+    )
+    node = CvdumpNode(section=1, offset=0x28)
+    node.node_type = EntityType.VTABLE
+    node.friendly_name = "Unit1.TWidget"
+
+    analysis._apply_delphi_vmt_owner(node)
+
+    assert node.owner_unit == "Unit1"
+    assert node.friendly_name == "Unit1.TWidget"
 
 
 def test_project_detect_uses_binary_when_it_has_embedded_td32(tmp_path):
