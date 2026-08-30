@@ -1,3 +1,4 @@
+from bisect import bisect_left
 from dataclasses import dataclass
 from functools import cache
 import struct
@@ -18,7 +19,8 @@ from reccmp.formats.exceptions import (
     InvalidVirtualReadError,
 )
 from reccmp.formats import Image, PEImage
-from reccmp.types import ImageId
+from reccmp.formats.image import ImageSectionFlags
+from reccmp.types import EntityType, ImageId
 
 
 def has_asserts(image: Image) -> bool:
@@ -60,6 +62,63 @@ def create_valid_addr_lookup(
     return lookup
 
 
+def create_unresolved_operand_lookup(
+    db: EntityDb, image_id: ImageId, bin_file: Image
+) -> Callable[[int], bool]:
+    """Classify an unnamed external operand as data-like rather than code.
+
+    ParseAsm deliberately creates generic placeholders for several kinds of
+    addresses.  A missing symbol is actionable telemetry only when the target
+    is storage (including RTTI/VMT/constant tables) or has no inventory entity;
+    unnamed function and import targets remain ordinary code placeholders.
+    """
+
+    code_types = {
+        EntityType.FUNCTION,
+        EntityType.IMPORT,
+        EntityType.IMPORT_THUNK,
+        EntityType.THUNK,
+        EntityType.VTORDISP,
+        EntityType.LABEL,
+    }
+
+    @cache
+    def lookup(addr: int) -> bool:
+        is_valid_vaddr = getattr(bin_file, "is_valid_vaddr", None)
+        if callable(is_valid_vaddr) and not is_valid_vaddr(addr):
+            # TEB offsets, sentinels, masks, and protocol constants are not
+            # application-image storage operands.
+            return False
+
+        entity = db.get(image_id, addr, exact=True)
+        if entity is None:
+            entity = db.get(image_id, addr, exact=False)
+            if entity is not None:
+                base_addr = entity.addr(image_id)
+                if base_addr is None or not (
+                    base_addr <= addr < base_addr + entity.any_size(image_id)
+                ):
+                    entity = None
+
+        if entity is not None:
+            return entity.entity_type not in code_types
+
+        # An unnamed target in executable storage is normally a local/static
+        # code entry.  Named DATA entities embedded in CODE were handled above.
+        sections = getattr(bin_file, "sections", ())
+        for section in sections:
+            if section.contains_vaddr(addr):
+                return ImageSectionFlags.EXECUTE not in section.flags
+
+        # Some image readers accept any address below the image-wide upper
+        # bound in ``is_valid_vaddr``.  Alignment holes and addresses between
+        # PE sections are not storage and must not become unresolved DATA
+        # telemetry merely because they fall inside that coarse bound.
+        return False
+
+    return lookup
+
+
 def create_bin_lookup(bin_file: Image) -> Callable[[int], int | None]:
     """Function generator to read a pointer from the bin file"""
 
@@ -69,6 +128,75 @@ def create_bin_lookup(bin_file: Image) -> Callable[[int], int | None]:
             return ptr
         except (struct.error, InvalidVirtualAddressError, InvalidVirtualReadError):
             return None
+
+    return lookup
+
+
+def create_relocation_site_lookup(
+    bin_file: Image,
+) -> Callable[[int, int], bool] | None:
+    """Return whether an instruction contains a PE base-relocation site."""
+
+    if not isinstance(bin_file, PEImage):
+        return None
+
+    relocation_sites = tuple(sorted(bin_file.relocations))
+
+    @cache
+    def lookup(addr: int, size: int) -> bool:
+        index = bisect_left(relocation_sites, addr)
+        return index < len(relocation_sites) and relocation_sites[index] < addr + size
+
+    return lookup
+
+
+def create_internal_relocation_lookup(
+    bin_file: Image,
+) -> Callable[[int, int], tuple[int, ...]] | None:
+    """Return internal code addresses referenced by relocations in a range."""
+
+    if not isinstance(bin_file, PEImage):
+        return None
+
+    relocation_sites = tuple(sorted(bin_file.relocations))
+
+    @cache
+    def lookup(addr: int, size: int) -> tuple[int, ...]:
+        end = addr + size
+        index = bisect_left(relocation_sites, addr)
+        targets: set[int] = set()
+        while index < len(relocation_sites) and relocation_sites[index] < end:
+            try:
+                (target,) = struct.unpack(
+                    "<L", bin_file.read(relocation_sites[index], 4)
+                )
+            except (struct.error, InvalidVirtualAddressError, InvalidVirtualReadError):
+                index += 1
+                continue
+            if addr <= target < end:
+                targets.add(target)
+            index += 1
+        return tuple(sorted(targets))
+
+    return lookup
+
+
+def create_relocation_sites_lookup(
+    bin_file: Image,
+) -> Callable[[int, int], tuple[int, ...]] | None:
+    """Return PE relocation sites contained by an address range."""
+
+    if not isinstance(bin_file, PEImage):
+        return None
+
+    relocation_sites = tuple(sorted(bin_file.relocations))
+
+    @cache
+    def lookup(addr: int, size: int) -> tuple[int, ...]:
+        end = addr + size
+        first = bisect_left(relocation_sites, addr)
+        last = bisect_left(relocation_sites, end, lo=first)
+        return relocation_sites[first:last]
 
     return lookup
 
@@ -91,6 +219,12 @@ class FunctionComparator:
                 ImageId.ORIG,
                 create_bin_lookup(self.orig_bin),
             ),
+            relocation_test=create_relocation_site_lookup(self.orig_bin),
+            code_reference_lookup=create_internal_relocation_lookup(self.orig_bin),
+            relocation_site_lookup=create_relocation_sites_lookup(self.orig_bin),
+            unresolved_operand_test=create_unresolved_operand_lookup(
+                self.db, ImageId.ORIG, self.orig_bin
+            ),
             is_32bit=self.is_32bit,
         )
         self.recomp_sanitize = ParseAsm(
@@ -101,6 +235,12 @@ class FunctionComparator:
                 self.db,
                 ImageId.RECOMP,
                 create_bin_lookup(self.recomp_bin),
+            ),
+            relocation_test=create_relocation_site_lookup(self.recomp_bin),
+            code_reference_lookup=create_internal_relocation_lookup(self.recomp_bin),
+            relocation_site_lookup=create_relocation_sites_lookup(self.recomp_bin),
+            unresolved_operand_test=create_unresolved_operand_lookup(
+                self.db, ImageId.RECOMP, self.recomp_bin
             ),
             is_32bit=self.is_32bit,
         )
@@ -129,6 +269,26 @@ class FunctionComparator:
                 orig_size = recomp_size
 
         assert orig_size is not None and recomp_size is not None
+
+        # A Delphi procedure symbol can end its executable instructions before
+        # compiler-emitted static data that still belongs to the procedure.
+        # TD32 deliberately reports the executable boundary.  When explicit
+        # original metadata includes such a tail, extend the rebuilt range only
+        # if the established next-symbol boundary permits it and every added
+        # byte is identical.  This avoids absorbing unrelated post-epilogue
+        # code while retaining proven stock RTL/VCL tables.
+        if orig_size > recomp_size:
+            recomp_max = match.get("delphi_lexical_size")
+            if recomp_max is None:
+                recomp_max = match.max_size(ImageId.RECOMP)
+            extension = orig_size - recomp_size
+            if recomp_max is not None and orig_size <= recomp_max:
+                orig_tail = self.orig_bin.read(match.orig_addr + recomp_size, extension)
+                recomp_tail = self.recomp_bin.read(
+                    match.recomp_addr + recomp_size, extension
+                )
+                if orig_tail == recomp_tail and len(orig_tail) == extension:
+                    recomp_size = orig_size
 
         orig_raw = self.orig_bin.read(match.orig_addr, orig_size)
         recomp_raw = self.recomp_bin.read(match.recomp_addr, recomp_size)
@@ -164,9 +324,20 @@ class FunctionComparator:
             orig_combined, recomp_combined, line_annotations
         )
 
-        return self._compare_function_assembly(
+        result = self._compare_function_assembly(
             orig_combined, recomp_combined, split_points
         )
+        result.orig_size = len(orig_raw)
+        result.recomp_size = len(recomp_raw)
+        result.has_unresolved_operands = bool(
+            self.orig_sanitize.unresolved_operands
+            or self.recomp_sanitize.unresolved_operands
+        )
+        result.unresolved_orig_operands = tuple(self.orig_sanitize.unresolved_operands)
+        result.unresolved_recomp_operands = tuple(
+            self.recomp_sanitize.unresolved_operands
+        )
+        return result
 
     @staticmethod
     def _print_recomp_instruction(

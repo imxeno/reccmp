@@ -920,6 +920,185 @@ def _split_overlapping_delphi_library_ranges(db: EntityDb):
                     batch.set(image_id, address, size=boundary_size)
 
 
+def _is_writable_data_range(image: Image, address: int, size: int) -> bool:
+    """Return whether one complete range belongs to writable, non-code storage."""
+
+    if size <= 0:
+        return False
+    sections = [
+        section
+        for section in image.sections
+        if address in section.virtual_range
+        and address + size - 1 in section.virtual_range
+    ]
+    if len(sections) != 1:
+        return False
+    flags = sections[0].flags
+    return bool(flags & ImageSectionFlags.WRITE) and not bool(
+        flags & ImageSectionFlags.EXECUTE
+    )
+
+
+def _data_match_candidate_is_available(
+    db: EntityDb, recompiled_address: int, original_address: int
+) -> bool:
+    """Reject a rebuilt DATA target already claimed by another entity."""
+
+    candidate = db.get(ImageId.RECOMP, recompiled_address, exact=True)
+    if candidate is None:
+        return True
+    if candidate.entity_type not in (None, EntityType.DATA):
+        return False
+    if not candidate.matched:
+        return True
+    return candidate.orig_addr == original_address
+
+
+def match_delphi_library_data_references(
+    db: EntityDb,
+    original_image: Image,
+    recompiled_image: Image,
+    report: ReccmpReportProtocol = reccmp_report_nop,
+):
+    """Match private Delphi DATA through corresponding relocated references.
+
+    Stock Delphi units contain resourcestring cells, linker aliases, and local
+    constant tables that have no public TD32 symbol.  Their identity is still
+    present in the binaries: corresponding instructions in an already matched
+    stock-library function have PE relocations at the same relative byte and
+    refer to the corresponding DATA cell.  Accept a pair only when every such
+    stock reference agrees and the inferred relation is one-to-one.
+
+    Application functions are intentionally excluded.  A source-level change
+    there could place a different relocation at the same byte offset; stock
+    library functions provide the independent, fixed-code anchor needed for
+    this structural inference.
+    """
+
+    original_relocations = tuple(sorted(getattr(original_image, "relocations", ())))
+    recompiled_relocations = frozenset(getattr(recompiled_image, "relocations", ()))
+    if not original_relocations or not recompiled_relocations:
+        return
+
+    proposals: defaultdict[int, set[int]] = defaultdict(set)
+    evidence_counts: defaultdict[tuple[int, int], int] = defaultdict(int)
+    for function in db.get_functions():
+        if not function.get("library") or not function.get("is_delphi"):
+            continue
+
+        original_size = function.size(ImageId.ORIG) or function.max_size(ImageId.ORIG)
+        recompiled_size = function.size(ImageId.RECOMP) or function.max_size(
+            ImageId.RECOMP
+        )
+        if not original_size or not recompiled_size:
+            continue
+        shared_size = min(original_size, recompiled_size)
+
+        first = bisect_left(original_relocations, function.orig_addr)
+        last = bisect_left(
+            original_relocations, function.orig_addr + shared_size, lo=first
+        )
+        for original_site in original_relocations[first:last]:
+            relative_site = original_site - function.orig_addr
+            recompiled_site = function.recomp_addr + relative_site
+            if recompiled_site not in recompiled_relocations:
+                continue
+
+            try:
+                (original_target,) = struct.unpack(
+                    "<L", original_image.read(original_site, 4)
+                )
+                (recompiled_target,) = struct.unpack(
+                    "<L", recompiled_image.read(recompiled_site, 4)
+                )
+            except (IndexError, ValueError, OSError, struct.error):
+                continue
+
+            original_entity = db.get(ImageId.ORIG, original_target, exact=True)
+            if (
+                original_entity is None
+                or original_entity.matched
+                or original_entity.entity_type != EntityType.DATA
+            ):
+                continue
+            size = original_entity.size(ImageId.ORIG)
+            if (
+                size is None
+                or not _is_writable_data_range(original_image, original_target, size)
+                or not _is_writable_data_range(
+                    recompiled_image, recompiled_target, size
+                )
+                or not _data_match_candidate_is_available(
+                    db, recompiled_target, original_target
+                )
+            ):
+                continue
+
+            proposals[original_target].add(recompiled_target)
+            evidence_counts[(original_target, recompiled_target)] += 1
+
+    reverse_proposals: defaultdict[int, set[int]] = defaultdict(set)
+    for original_address, candidates in proposals.items():
+        if len(candidates) == 1:
+            reverse_proposals[next(iter(candidates))].add(original_address)
+
+    accepted: list[tuple[ReccmpEntity, int]] = []
+    for original_address, candidates in proposals.items():
+        original_entity = db.get(ImageId.ORIG, original_address, exact=True)
+        assert original_entity is not None
+        if len(candidates) != 1:
+            report(
+                ReccmpEvent.AMBIGUOUS_MATCH,
+                original_address,
+                msg=(
+                    f"Rejected Delphi library DATA '{original_entity.best_name()}': "
+                    f"relocated references proposed {len(candidates)} rebuilt targets"
+                ),
+            )
+            continue
+
+        recompiled_address = next(iter(candidates))
+        if len(reverse_proposals[recompiled_address]) != 1:
+            report(
+                ReccmpEvent.AMBIGUOUS_MATCH,
+                original_address,
+                msg=(
+                    f"Rejected Delphi library DATA '{original_entity.best_name()}': "
+                    "rebuilt target is not one-to-one"
+                ),
+            )
+            continue
+        accepted.append((original_entity, recompiled_address))
+
+    with db.batch() as batch:
+        for original_entity, recompiled_address in accepted:
+            original_address = _original_address(original_entity)
+            size = original_entity.size(ImageId.ORIG)
+            name = original_entity.best_name()
+            assert size is not None and name is not None
+            batch.set(
+                ImageId.ORIG,
+                original_address,
+                library=True,
+                is_delphi=True,
+                data_match_reason="relocated_library_reference",
+                data_match_evidence=evidence_counts[
+                    (original_address, recompiled_address)
+                ],
+            )
+            batch.set(
+                ImageId.RECOMP,
+                recompiled_address,
+                type=EntityType.DATA,
+                size=size,
+                computed_name=name,
+                library=True,
+                is_delphi=True,
+                data_match_reason="relocated_library_reference",
+            )
+            batch.match(original_address, recompiled_address)
+
+
 def _match_delphi_library_alternate_entries(
     db: EntityDb,
     original_image: Image,

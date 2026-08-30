@@ -18,6 +18,8 @@ class RawImage(Image):
     size: int
     """Total size of the image including physical bytes (`data` property) and uninitialized memory."""
 
+    relocations: set[int] = dataclasses.field(default_factory=set)
+
     @classmethod
     def from_memory(cls, data: bytes = b"", *, bss: int = 0) -> "RawImage":
         """Creates the image's memory in this order:

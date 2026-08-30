@@ -494,6 +494,11 @@ def test_size_decimal_or_hex():
     ]
 
 
+def test_missing_optional_trailing_value():
+    text = "address,name,x-optional\n0x1000,Global"
+    assert list(csv_parse(text)) == [(0x1000, {"name": "Global"})]
+
+
 def test_size_empty_valid():
     """Should not raise exception if size contains 0-to-N whitespace characters."""
 

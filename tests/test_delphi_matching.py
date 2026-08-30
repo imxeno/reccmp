@@ -11,6 +11,7 @@ from reccmp.compare.db import EntityDb, ReccmpEntity
 from reccmp.compare.event import ReccmpEvent, ReccmpReportProtocol
 from reccmp.compare.match_delphi import (
     match_delphi_compiler_startup_functions,
+    match_delphi_library_data_references,
     match_delphi_lifecycle_functions,
     match_delphi_library_layout,
     match_delphi_library_functions,
@@ -1152,6 +1153,173 @@ def test_match_delphi_library_boundary_rejects_unsafe_fingerprint(
     match_delphi_library_layout(db, original, recompiled)
 
     assert _get_entity(db, ImageId.ORIG, 0x20).recomp_addr is None
+
+
+def _delphi_data_reference_images(
+    references: tuple[tuple[int, int, int, int], ...],
+) -> tuple[RawImage, RawImage]:
+    """Build paired images from (orig function, recomp function, orig DATA, recomp DATA)."""
+
+    original_memory = bytearray(0x300)
+    recompiled_memory = bytearray(0x300)
+    original_relocations: set[int] = set()
+    recompiled_relocations: set[int] = set()
+    for (
+        original_function,
+        recompiled_function,
+        original_data,
+        recompiled_data,
+    ) in references:
+        original_memory[original_function : original_function + 6] = (
+            b"\xa1" + struct.pack("<L", original_data) + b"\xc3"
+        )
+        recompiled_memory[recompiled_function : recompiled_function + 6] = (
+            b"\xa1" + struct.pack("<L", recompiled_data) + b"\xc3"
+        )
+        original_relocations.add(original_function + 1)
+        recompiled_relocations.add(recompiled_function + 1)
+
+    original = RawImage.from_memory(bytes(original_memory))
+    recompiled = RawImage.from_memory(bytes(recompiled_memory))
+    for image, relocations in (
+        (original, original_relocations),
+        (recompiled, recompiled_relocations),
+    ):
+        image.relocations = relocations
+        image.sections = (
+            ImageSection(
+                virtual_range=range(0, 0x100),
+                physical_range=range(0, 0x100),
+                view=image.view[:0x100],
+                name=".text",
+                flags=ImageSectionFlags.READ | ImageSectionFlags.EXECUTE,
+            ),
+            ImageSection(
+                virtual_range=range(0x100, 0x300),
+                physical_range=range(0x100, 0x300),
+                view=image.view[0x100:0x300],
+                name=".data",
+                flags=ImageSectionFlags.READ | ImageSectionFlags.WRITE,
+            ),
+        )
+    return original, recompiled
+
+
+def _add_matched_library_reference_function(
+    db: EntityDb,
+    original: int,
+    recompiled: int,
+    name: str,
+    *,
+    library: bool = True,
+) -> None:
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            original,
+            type=EntityType.FUNCTION,
+            name=f"Classes.{name}",
+            library=library,
+            size=6,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            recompiled,
+            type=EntityType.FUNCTION,
+            name=f"Classes.{name}",
+            owner_unit="Classes",
+            library=library,
+            is_delphi=True,
+            size=6,
+        )
+        batch.match(original, recompiled)
+
+
+def test_match_delphi_library_data_from_corresponding_relocations(db: EntityDb):
+    original, recompiled = _delphi_data_reference_images(((0x10, 0x40, 0x120, 0x180),))
+    _add_matched_library_reference_function(db, 0x10, 0x40, "ReadResource")
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            0x120,
+            type=EntityType.DATA,
+            name="SysConst.SExample",
+            size=4,
+        )
+
+    match_delphi_library_data_references(db, original, recompiled)
+
+    match = _get_entity(db, ImageId.ORIG, 0x120)
+    assert match.recomp_addr == 0x180
+    assert match.get("data_match_reason") == "relocated_library_reference"
+    assert _get_entity(db, ImageId.RECOMP, 0x180).best_name() == "SysConst.SExample"
+
+
+def test_match_delphi_library_data_rejects_disagreeing_references(db: EntityDb):
+    original, recompiled = _delphi_data_reference_images(
+        (
+            (0x10, 0x40, 0x120, 0x180),
+            (0x20, 0x50, 0x120, 0x184),
+        )
+    )
+    _add_matched_library_reference_function(db, 0x10, 0x40, "First")
+    _add_matched_library_reference_function(db, 0x20, 0x50, "Second")
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            0x120,
+            type=EntityType.DATA,
+            name="SysConst.SAmbiguous",
+            size=4,
+        )
+
+    match_delphi_library_data_references(db, original, recompiled)
+
+    assert _get_entity(db, ImageId.ORIG, 0x120).recomp_addr is None
+
+
+def test_match_delphi_library_data_rejects_application_reference(db: EntityDb):
+    original, recompiled = _delphi_data_reference_images(((0x10, 0x40, 0x120, 0x180),))
+    _add_matched_library_reference_function(
+        db, 0x10, 0x40, "ApplicationRead", library=False
+    )
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            0x120,
+            type=EntityType.DATA,
+            name="GameState.AccidentalOffset",
+            size=4,
+        )
+
+    match_delphi_library_data_references(db, original, recompiled)
+
+    assert _get_entity(db, ImageId.ORIG, 0x120).recomp_addr is None
+
+
+def test_match_delphi_library_data_requires_one_to_one_target(db: EntityDb):
+    original, recompiled = _delphi_data_reference_images(
+        (
+            (0x10, 0x40, 0x120, 0x180),
+            (0x20, 0x50, 0x124, 0x180),
+        )
+    )
+    _add_matched_library_reference_function(db, 0x10, 0x40, "First")
+    _add_matched_library_reference_function(db, 0x20, 0x50, "Second")
+    with db.batch() as batch:
+        for address, name in ((0x120, "FirstCell"), (0x124, "SecondCell")):
+            batch.set(
+                ImageId.ORIG,
+                address,
+                type=EntityType.DATA,
+                name=f"Classes.{name}",
+                size=4,
+            )
+
+    match_delphi_library_data_references(db, original, recompiled)
+
+    assert _get_entity(db, ImageId.ORIG, 0x120).recomp_addr is None
+    assert _get_entity(db, ImageId.ORIG, 0x124).recomp_addr is None
 
 
 def add_delphi_placeholder_span(

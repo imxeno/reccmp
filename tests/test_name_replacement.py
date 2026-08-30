@@ -53,6 +53,18 @@ def test_name_replacement(db):
     assert lookup(300) is None
 
 
+def test_name_replacement_normalizes_delphi_first_array_element(db):
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            100,
+            name="ShowCommands[0]",
+            type=EntityType.DATA,
+        )
+
+    assert create_lookup(db)(100) == "ShowCommands (DATA)"
+
+
 def test_name_hierarchy(db):
     """Use the "best" entity name. Currently there are only two.
     'computed_name' is preferred over just 'name'."""

@@ -15,10 +15,18 @@ class RawDiffOutput:
 
 
 @dataclasses.dataclass
+# Comparison results carry both presentation data and the range/provenance
+# metadata needed by machine-readable consumers.
+# pylint: disable=too-many-instance-attributes
 class EntityCompareResult:
     diff: RawDiffOutput = dataclasses.field(default_factory=RawDiffOutput)
     is_effective_match: bool = False
     match_ratio: float = 0.0
+    orig_size: int | None = None
+    recomp_size: int | None = None
+    has_unresolved_operands: bool = False
+    unresolved_orig_operands: tuple[int, ...] = ()
+    unresolved_recomp_operands: tuple[int, ...] = ()
 
 
 class MatchingOrMismatchingBlock(TypedDict):
@@ -139,6 +147,7 @@ def raw_diff_to_udiff(
 
 
 @dataclasses.dataclass
+# pylint: disable=too-many-instance-attributes
 class DiffReport:
     match_type: EntityType
     orig_addr: int
@@ -147,6 +156,8 @@ class DiffReport:
     result: EntityCompareResult = dataclasses.field(default_factory=EntityCompareResult)
     is_stub: bool = False
     is_library: bool = False
+    orig_size: int | None = None
+    recomp_size: int | None = None
 
     @property
     def ratio(self) -> float:

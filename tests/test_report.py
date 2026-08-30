@@ -6,7 +6,11 @@ from reccmp.compare.report import (
     ReccmpComparedEntity,
     combine_reports,
     ReccmpReportSameSourceError,
+    deserialize_reccmp_report,
+    serialize_reccmp_report,
 )
+from reccmp.compare.diff import DiffReport, EntityCompareResult, RawDiffOutput
+from reccmp.types import EntityType
 
 
 def create_report(
@@ -138,6 +142,35 @@ def test_same_source():
     for x in reports:
         assert x.has_same_source(report_hello) is False
         assert report_hello.has_same_source(x) is False
+
+
+def test_diet_report_retains_unresolved_operand_telemetry():
+    report = ReccmpStatusReport(filename="test.exe")
+    report.add_match(
+        DiffReport(
+            match_type=EntityType.FUNCTION,
+            orig_addr=0x100,
+            recomp_addr=0x200,
+            name="Unit.Function",
+            result=EntityCompareResult(
+                match_ratio=1.0,
+                has_unresolved_operands=True,
+                unresolved_orig_operands=(0x1234,),
+                unresolved_recomp_operands=(0x5678,),
+                diff=RawDiffOutput(
+                    orig_inst=[("0x100", "mov eax, <OFFSET1>")],
+                    recomp_inst=[("0x200", "mov eax, <OFFSET1>")],
+                ),
+            ),
+        )
+    )
+
+    serialized = serialize_reccmp_report(report, diff_included=False)
+    restored = deserialize_reccmp_report(serialized)
+
+    assert restored.entities["0x100"].has_unresolved_operands
+    assert restored.entities["0x100"].unresolved_orig_operands == ("0x1234",)
+    assert restored.entities["0x100"].unresolved_recomp_operands == ("0x5678",)
 
 
 def test_aggregate_recomp_addr():

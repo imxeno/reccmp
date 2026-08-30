@@ -8,10 +8,15 @@ placeholder string."""
 
 import re
 from functools import cache
+from typing import Callable, Iterable
 from typing_extensions import Buffer
 from .const import JUMP_MNEMONICS, SINGLE_OPERAND_INSTS
 from .instgen import InstructGen, SectionType
-from .replacement import AddrTestProtocol, NameReplacementProtocol
+from .replacement import (
+    AddrTestProtocol,
+    NameReplacementProtocol,
+    RelocationTestProtocol,
+)
 from .types import DisasmLiteInst
 
 AsmExcerpt = list[tuple[int | None, str]]
@@ -35,23 +40,38 @@ def from_hex(string: str) -> int | None:
 
 
 class ParseAsm:
+    # The parser's collaborators are deliberately injectable so tests and image
+    # formats can provide address, relocation, and symbol evidence independently.
+    # pylint: disable=too-many-instance-attributes,too-many-arguments,too-many-positional-arguments
     def __init__(
         self,
         addr_test: AddrTestProtocol | None = None,
         name_lookup: NameReplacementProtocol | None = None,
+        relocation_test: RelocationTestProtocol | None = None,
+        code_reference_lookup: Callable[[int, int], Iterable[int]] | None = None,
+        relocation_site_lookup: Callable[[int, int], Iterable[int]] | None = None,
+        unresolved_operand_test: Callable[[int], bool] | None = None,
         is_32bit: bool = True,
     ) -> None:
         self.addr_test = addr_test
         self.name_lookup = name_lookup
+        self.relocation_test = relocation_test
+        self.code_reference_lookup = code_reference_lookup
+        self.relocation_site_lookup = relocation_site_lookup
+        self.unresolved_operand_test = unresolved_operand_test
         self.is_32bit = is_32bit
 
         self.replacements: dict[int, str] = {}
         self.indirect_replacements: dict[int, str] = {}
+        self.unresolved_operands: list[int] = []
+        self._active_range: range | None = None
         self.number_placeholders = True
 
     def reset(self):
         self.replacements = {}
         self.indirect_replacements = {}
+        self.unresolved_operands = []
+        self._active_range = None
 
     def is_addr(self, value: int) -> bool:
         """Wrapper for user-provided address test"""
@@ -76,7 +96,23 @@ class ParseAsm:
         number = len(self.replacements) + len(self.indirect_replacements) + 1
         return f"<OFFSET{number}>" if self.number_placeholders else "<OFFSET>"
 
-    def replace(self, addr: int, exact: bool = False) -> str:
+    def _record_unresolved_operand(self, addr: int) -> None:
+        """Record only external, data-like operands that lack a symbol.
+
+        Generic OFFSET placeholders are also used for unnamed code targets and
+        function-local tables.  Those are useful for normalized comparison but
+        are not unresolved global/RTTI/VMT references.
+        """
+
+        if self._active_range is not None and addr in self._active_range:
+            return
+        if callable(self.unresolved_operand_test) and self.unresolved_operand_test(
+            addr
+        ):
+            if addr not in self.unresolved_operands:
+                self.unresolved_operands.append(addr)
+
+    def replace(self, addr: int, exact: bool = False, *, is_code: bool = False) -> str:
         """Provide a replacement name for the given address."""
         if addr in self.replacements:
             return self.replacements[addr]
@@ -84,6 +120,9 @@ class ParseAsm:
         if (name := self.lookup(addr, exact=exact)) is not None:
             self.replacements[addr] = name
             return name
+
+        if not is_code:
+            self._record_unresolved_operand(addr)
 
         placeholder = self._next_placeholder()
         self.replacements[addr] = placeholder
@@ -97,6 +136,8 @@ class ParseAsm:
             self.indirect_replacements[addr] = name
             return name
 
+        self._record_unresolved_operand(addr)
+
         placeholder = self._next_placeholder()
         self.indirect_replacements[addr] = placeholder
         return placeholder
@@ -106,12 +147,19 @@ class ParseAsm:
         value = int(match.group(1), 16)
         return self.replace(value)
 
-    def hex_replace_relocated(self, match: re.Match) -> str:
+    def hex_replace_relocated(
+        self, match: re.Match, inst: DisasmLiteInst | None = None
+    ) -> str:
         """For replacing immediate value operands. We only want to
         use the placeholder if we are certain that this is a valid address.
         We can check the relocation table to find out."""
         value = int(match.group(1), 16)
-        if self.is_addr(value):
+        if callable(self.relocation_test) and inst is not None:
+            is_address_operand = self.relocation_test(inst.address, inst.size)
+        else:
+            is_address_operand = self.is_addr(value)
+
+        if is_address_operand:
             return self.replace(value)
 
         return match.group(0)
@@ -149,10 +197,17 @@ class ParseAsm:
             and (op_str_address := from_hex(inst.op_str)) is not None
         ):
             if inst.mnemonic == "call":
-                return (inst.mnemonic, self.replace(op_str_address, exact=True))
+                return (
+                    inst.mnemonic,
+                    self.replace(op_str_address, exact=True, is_code=True),
+                )
 
             if inst.mnemonic == "push":
-                if self.is_addr(op_str_address):
+                if callable(self.relocation_test):
+                    is_address_operand = self.relocation_test(inst.address, inst.size)
+                else:
+                    is_address_operand = self.is_addr(op_str_address)
+                if is_address_operand:
                     return (inst.mnemonic, self.replace(op_str_address))
 
                 # To avoid falling into jump handling
@@ -182,22 +237,44 @@ class ParseAsm:
             # i.e. ptr [register + something]
             # Otherwise we would use a placeholder for every stack variable,
             # vtable call, or this->member access.
-            op_str = displace_replace_regex.sub(self.hex_replace_relocated, op_str)
+            op_str = displace_replace_regex.sub(
+                lambda match: self.hex_replace_relocated(match, inst), op_str
+            )
 
         # In the event of pointer comparison, only replace the immediate value
         # if it is a known address.
         if inst.mnemonic == "cmp":
             op_str = immediate_replace_regex.sub(self.hex_replace_annotated, op_str)
         else:
-            op_str = immediate_replace_regex.sub(self.hex_replace_relocated, op_str)
+            op_str = immediate_replace_regex.sub(
+                lambda match: self.hex_replace_relocated(match, inst), op_str
+            )
 
         return (inst.mnemonic, op_str)
 
     def parse_asm(self, data: Buffer, start_addr: int) -> AsmExcerpt:
         self.reset()
+        data_bytes = bytes(data)
+        self._active_range = range(start_addr, start_addr + len(data_bytes))
         asm: AsmExcerpt = []
 
-        ig = InstructGen(bytes(data), start_addr, self.is_32bit)
+        code_references = (
+            self.code_reference_lookup(start_addr, len(data_bytes))
+            if callable(self.code_reference_lookup)
+            else ()
+        )
+        relocation_sites = (
+            self.relocation_site_lookup(start_addr, len(data_bytes))
+            if callable(self.relocation_site_lookup)
+            else ()
+        )
+        ig = InstructGen(
+            data_bytes,
+            start_addr,
+            self.is_32bit,
+            code_references=code_references,
+            relocation_sites=relocation_sites,
+        )
 
         for section in ig.sections:
             if section.type == SectionType.CODE:
@@ -240,5 +317,24 @@ class ParseAsm:
                 asm.append((None, "Data table:"))
                 for ofs, b in section.contents:
                     asm.append((ofs, hex(b)))
+
+            elif section.type == SectionType.EXCEPT_TAB:
+                asm.append((None, "Exception table:"))
+                count = section.contents[0][1]
+                asm.append((section.contents[0][0], f"handlers {count}"))
+                for index in range(count):
+                    class_ofs, class_addr = section.contents[1 + index * 2]
+                    handler_ofs, handler_addr = section.contents[2 + index * 2]
+                    if class_addr == 0:
+                        class_name = "catch-all"
+                    else:
+                        class_name = self.replace(class_addr, exact=True)
+                    asm.append((class_ofs, f"class {class_name}"))
+                    asm.append(
+                        (
+                            handler_ofs,
+                            f"handler start + 0x{handler_addr - start_addr:x}",
+                        )
+                    )
 
         return asm

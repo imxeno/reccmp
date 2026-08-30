@@ -1,4 +1,4 @@
-from reccmp.compare.asm.instgen import InstructGen, SectionType
+from reccmp.compare.asm.instgen import CodeSection, InstructGen, SectionType, TabSection
 from reccmp.compare.asm.types import DisasmLiteInst
 
 
@@ -102,6 +102,170 @@ def test_beta_case():
     # Make sure we captured the instruction immediately after
     assert isinstance(ig.sections[2].contents[0], DisasmLiteInst)
     assert ig.sections[2].contents[0].mnemonic == "mov"
+
+
+def test_jump_table_stops_before_following_code():
+    """Do not decode a code tail as additional switch-table pointers."""
+    code = (
+        b"\x83\xf8\x01"  # cmp eax, 1
+        b"\x77\x17"  # ja 0x101e
+        b"\x8a\x80\x12\x10\x00\x00"  # mov al, byte ptr [eax + 0x1012]
+        b"\xff\x24\x85\x14\x10\x00\x00"  # jmp dword ptr [eax*4 + 0x1014]
+        b"\x00\x01"  # selector data table
+        b"\x1c\x10\x00\x00\x1e\x10\x00\x00"  # two jump targets
+        b"\x31\xc0\xc3"  # following code
+    )
+
+    ig = InstructGen(code, 0x1000)
+
+    assert [section.type for section in ig.sections] == [
+        SectionType.CODE,
+        SectionType.DATA_TAB,
+        SectionType.ADDR_TAB,
+        SectionType.CODE,
+    ]
+    address_table = ig.sections[2]
+    code_tail = ig.sections[3]
+    assert isinstance(address_table, TabSection)
+    assert isinstance(code_tail, CodeSection)
+    assert len(address_table.contents) == 2
+    assert code_tail.contents[0].address == 0x101C
+
+
+def test_internal_relocation_bounds_inline_data_before_code_tail():
+    code = (
+        b"\x8a\x80\x0c\x10\x00\x00"  # mov al, byte ptr [eax + 0x100c]
+        b"\xc3"  # ret
+        b"\x90\x90\x90\x90\x90"  # alignment before the inline table
+        b"\x00\x01"  # selector data table
+        b"\x31\xc0\xc3"  # compiler cleanup/code island at 0x100e
+    )
+
+    ig = InstructGen(code, 0x1000, code_references=(0x100E,))
+
+    assert [section.type for section in ig.sections] == [
+        SectionType.CODE,
+        SectionType.DATA_TAB,
+        SectionType.CODE,
+    ]
+    data_table = ig.sections[1]
+    code_tail = ig.sections[2]
+    assert isinstance(data_table, TabSection)
+    assert isinstance(code_tail, CodeSection)
+    assert len(data_table.contents) == 2
+    assert code_tail.contents[0].address == 0x100E
+
+
+def test_delphi_direct_absolute_load_finds_inline_data_table():
+    code = (
+        b"\xa0\x07\x10\x00\x00"  # mov al, byte ptr [0x1007]
+        b"\xc3\x00"  # ret and one alignment byte
+        b"\x00\x01\x02\x03"  # local selector table
+    )
+
+    ig = InstructGen(code, 0x1000)
+
+    assert [section.type for section in ig.sections] == [
+        SectionType.CODE,
+        SectionType.DATA_TAB,
+    ]
+    code_section = ig.sections[0]
+    data_table = ig.sections[1]
+    assert isinstance(code_section, CodeSection)
+    assert isinstance(data_table, TabSection)
+    assert code_section.contents[-1].address == 0x1005
+    assert bytes(value for _, value in data_table.contents) == b"\x00\x01\x02\x03"
+
+
+def test_delphi_typed_exception_table_is_not_disassembled_as_code():
+    code = (
+        b"\x31\xc0"  # xor eax, eax
+        b"\xe9\xf9\x0f\x00\x00"  # jmp external handler at 0x2000
+        b"\x01\x00\x00\x00"  # one typed handler
+        b"\x00\x30\x00\x00"  # exception VMT
+        b"\x13\x10\x00\x00"  # local handler at 0x1013
+        b"\x31\xc0\xc3"  # handler body
+    )
+    ig = InstructGen(
+        code,
+        0x1000,
+        code_references=(0x1013,),
+        relocation_sites=(0x100B, 0x100F),
+    )
+
+    assert [section.type for section in ig.sections] == [
+        SectionType.CODE,
+        SectionType.EXCEPT_TAB,
+        SectionType.CODE,
+    ]
+    exception_table = ig.sections[1]
+    code_tail = ig.sections[2]
+    assert isinstance(exception_table, TabSection)
+    assert isinstance(code_tail, CodeSection)
+    assert exception_table.contents == [
+        (0x1007, 1),
+        (0x100B, 0x3000),
+        (0x100F, 0x1013),
+    ]
+    assert code_tail.contents[0].address == 0x1013
+
+
+def test_delphi_lea_register_dispatch_finds_address_and_byte_tables():
+    code = (
+        b"\x8d\x1c\x85\x10\x10\x00\x00"  # lea ebx, [eax*4 + 0x1010]
+        b"\xff\xe3"  # jmp ebx
+        b"\x90\x90\x90\x90\x90\x90\x90"  # alignment
+        b"\x18\x10\x00\x00\x1a\x10\x00\x00"  # jump table
+        b"\x31\xc0\xc3"  # first arm
+        b"\x31\xc9\xc3"  # second arm
+    )
+    ig = InstructGen(code, 0x1000)
+
+    assert [section.type for section in ig.sections] == [
+        SectionType.CODE,
+        SectionType.ADDR_TAB,
+        SectionType.CODE,
+    ]
+    assert len(ig.sections[1].contents) == 2
+
+
+def test_delphi_lea_dispatch_can_target_clipped_nested_entries():
+    code = (
+        b"\x8d\x1c\x85\x10\x10\x00\x00"  # lea ebx, [eax*4 + 0x1010]
+        b"\xff\xe3"  # jmp ebx
+        b"\x90\x90\x90\x90\x90\x90\x90"  # alignment
+        b"\x00\x20\x00\x00\x10\x20\x00\x00"  # external nested entries
+    )
+    ig = InstructGen(
+        code,
+        0x1000,
+        relocation_sites=(0x1010, 0x1014),
+    )
+
+    assert ig.sections[1].type == SectionType.ADDR_TAB
+    assert len(ig.sections[1].contents) == 2
+
+
+def test_relocated_immediate_marks_referenced_trailing_data():
+    code = (
+        b"\xbb\x08\x10\x00\x00"  # mov ebx, 0x1008
+        b"\xc3\x90\x90"  # ret and alignment
+        b"AMPM"  # referenced trailing table
+    )
+    ig = InstructGen(
+        code,
+        0x1000,
+        code_references=(0x1008,),
+        relocation_sites=(0x1001,),
+    )
+
+    assert [section.type for section in ig.sections] == [
+        SectionType.CODE,
+        SectionType.DATA_TAB,
+    ]
+    data_table = ig.sections[1]
+    assert isinstance(data_table, TabSection)
+    assert bytes(value for _, value in data_table.contents) == b"AMPM"
 
 
 # LEGO1 0x1000fb50

@@ -27,6 +27,11 @@ class ReccmpComparedEntity:
     is_effective_match: bool = False
     is_stub: bool = False
     rdiff: RawDiffOutput | None = None
+    orig_size: int | None = None
+    recomp_size: int | None = None
+    has_unresolved_operands: bool = False
+    unresolved_orig_operands: tuple[str, ...] = ()
+    unresolved_recomp_operands: tuple[str, ...] = ()
 
     # Legacy field for importing version 1 files (aggregate).
     udiff: CombinedDiffOutput | None = None
@@ -79,6 +84,15 @@ class ReccmpStatusReport:
             is_effective_match=match.is_effective_match,
             is_stub=match.is_stub,
             rdiff=match.result.diff,
+            orig_size=match.orig_size,
+            recomp_size=match.recomp_size,
+            has_unresolved_operands=match.result.has_unresolved_operands,
+            unresolved_orig_operands=tuple(
+                hex(addr) for addr in match.result.unresolved_orig_operands
+            ),
+            unresolved_recomp_operands=tuple(
+                hex(addr) for addr in match.result.unresolved_recomp_operands
+            ),
         )
 
     def has_same_source(self, other: "ReccmpStatusReport") -> bool:
@@ -240,6 +254,11 @@ class JSONEntityVersion1:
     diff: CombinedDiffOutput | None = None
     # EntityType as int. Older reports do not include this field.
     type: int | None = None
+    orig_size: int | None = None
+    recomp_size: int | None = None
+    unresolved: bool = False
+    unresolved_orig: tuple[str, ...] = ()
+    unresolved_recomp: tuple[str, ...] = ()
 
 
 class JSONReportVersion1(BaseModel):
@@ -263,6 +282,11 @@ def _serialize_version_1(
             effective=e.is_effective_match,
             diff=get_udiff_for_entity(e) if diff_included else None,
             type=int(e.type) if e.type is not None else None,
+            orig_size=e.orig_size,
+            recomp_size=e.recomp_size,
+            unresolved=e.has_unresolved_operands,
+            unresolved_orig=e.unresolved_orig_operands,
+            unresolved_recomp=e.unresolved_recomp_operands,
         )
         for addr, e in report.entities.items()
     ]
@@ -297,6 +321,11 @@ def _deserialize_version_1(obj: JSONReportVersion1) -> ReccmpStatusReport:
             is_stub=e.stub,
             is_effective_match=e.effective,
             udiff=e.diff,
+            orig_size=e.orig_size,
+            recomp_size=e.recomp_size,
+            has_unresolved_operands=e.unresolved,
+            unresolved_orig_operands=e.unresolved_orig,
+            unresolved_recomp_operands=e.unresolved_recomp,
         )
 
     return report

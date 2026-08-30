@@ -4,8 +4,18 @@ from reccmp.compare.db import EntityDb, ReccmpEntity
 from reccmp.types import EntityType, ImageId
 
 
+def _canonical_comparison_name(name: str) -> str:
+    """Normalize IDR's first-element spelling for Delphi static arrays."""
+
+    return name.replace("[0] (DATA)", " (DATA)")
+
+
 class AddrTestProtocol(Protocol):
     def __call__(self, addr: int, /) -> bool: ...
+
+
+class RelocationTestProtocol(Protocol):
+    def __call__(self, addr: int, size: int, /) -> bool: ...
 
 
 class NameReplacementProtocol(Protocol):
@@ -36,7 +46,8 @@ def create_name_lookup(
         a string with the base name plus the offset.
         Returns None if there is no suitable name."""
         if offset == 0:
-            return entity.match_name()
+            name = entity.match_name()
+            return _canonical_comparison_name(name) if name is not None else None
 
         # We will not return an offset name if this is not a variable
         # or if the offset is outside the range of the entity.

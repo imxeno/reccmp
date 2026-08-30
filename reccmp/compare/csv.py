@@ -122,7 +122,7 @@ def decimal_or_hex(value: str) -> int:
         raise CsvInvalidNumberError(value) from ex
 
 
-def _convert_attrs(values: Iterable[tuple[str, str]]) -> CsvValuesType:
+def _convert_attrs(values: Iterable[tuple[str, str | None]]) -> CsvValuesType:
     """Both a filter and a conversion step for the row values.
     For the incoming iterable of key/value pairs, only output the ones we want set
     in the reccmp database. Some keys have their value converted to a different type."""
@@ -134,7 +134,7 @@ def _convert_attrs(values: Iterable[tuple[str, str]]) -> CsvValuesType:
             continue
 
         # Skip any blank value (including whitespace).
-        if not value.strip():
+        if value is None or not value.strip():
             continue
 
         if key == "symbol":

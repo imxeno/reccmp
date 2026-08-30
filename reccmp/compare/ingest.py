@@ -65,6 +65,14 @@ def load_cvdump(
             addr = recomp_bin.get_abs_addr(sym.section, sym.offset)
             sym.addr = addr
 
+            delphi_lexical_attributes = {}
+            if (
+                isinstance(cvdump_analysis, DelphiTd32Analysis)
+                and sym.node_type == EntityType.FUNCTION
+                and sym.symbol_entry is not None
+            ):
+                delphi_lexical_attributes["delphi_lexical_size"] = sym.symbol_entry.size
+
             if addr in seen_addrs:
                 continue
 
@@ -127,6 +135,7 @@ def load_cvdump(
                         size=sym.size(),
                         owner_unit=sym.owner_unit,
                         vtable_prefix_size=sym.vtable_prefix_size,
+                        **delphi_lexical_attributes,
                         **delphi_attributes,
                     )
                 else:
@@ -138,6 +147,7 @@ def load_cvdump(
                         symbol=sym.decorated_name,
                         size=sym.size(),
                         vtable_prefix_size=sym.vtable_prefix_size,
+                        **delphi_lexical_attributes,
                         **delphi_attributes,
                     )
 

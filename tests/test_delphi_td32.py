@@ -495,6 +495,46 @@ def test_delphi_td32_procedure_size_excludes_trailing_literal_data():
     assert _td32_procedure_code_size(RawImage.from_memory(code), 0, symbol) == 7
 
 
+def test_delphi_td32_procedure_size_includes_branch_past_first_return():
+    code = (
+        b"\x85\xc0"  # test eax, eax
+        b"\x74\x03"  # je 7
+        b"\xb0\x01\xc3"  # mov al, 1; ret
+        b"\x31\xc0\xc3"  # xor eax, eax; ret
+        b"literal data"
+    )
+    symbol = SymbolsEntry(
+        type="S_GPROC32",
+        section=1,
+        offset=0,
+        size=len(code),
+        func_type=CvdumpTypeKey(0x1004),
+        name="BoolToStr",
+        debug_start=0,
+        debug_end=4,
+    )
+
+    assert _td32_procedure_code_size(RawImage.from_memory(code), 0, symbol) == 10
+
+
+def test_delphi_td32_procedure_size_excludes_referenced_trailing_table():
+    code = b"\x31\xc0\xbb\x08\x00\x00\x00\xc3" + b"AMPM"
+    image = RawImage.from_memory(code)
+    image.relocations = {3}
+    symbol = SymbolsEntry(
+        type="S_GPROC32",
+        section=1,
+        offset=0,
+        size=len(code),
+        func_type=CvdumpTypeKey(0x1004),
+        name="AppendFormat",
+        debug_start=0,
+        debug_end=7,
+    )
+
+    assert _td32_procedure_code_size(image, 0, symbol) == 8
+
+
 def test_delphi_td32_analysis_qualifies_unit_lifecycle_names():
     analysis = DelphiTd32Analysis.from_bytes(build_lifecycle_td32_stream())
 

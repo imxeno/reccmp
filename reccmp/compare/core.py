@@ -35,6 +35,7 @@ from .match_msvc import (
 )
 from .match_delphi import (
     match_delphi_compiler_startup_functions,
+    match_delphi_library_data_references,
     match_delphi_lifecycle_functions,
     match_delphi_library_layout,
     match_delphi_library_functions,
@@ -223,6 +224,12 @@ class Compare:
             self.report,
         )
 
+        match_delphi_library_data_references(
+            self._db,
+            self.orig_bin,
+            self.recomp_bin,
+            self.report,
+        )
         match_delphi_lifecycle_guards(
             self._db,
             self.orig_bin,
@@ -442,6 +449,8 @@ class Compare:
             result=result,
             is_library=match.get("library", False),
             is_stub=match.get("stub", False),
+            orig_size=result.orig_size or match.size(ImageId.ORIG),
+            recomp_size=result.recomp_size or match.size(ImageId.RECOMP),
         )
 
     ## Public API

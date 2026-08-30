@@ -454,7 +454,11 @@ def qualify_delphi_function_name(owner_unit: str, name: str | None) -> str | Non
     return f"{owner_unit}.{name}"
 
 
-def _td32_procedure_code_size(image: Image, address: int, symbol: SymbolsEntry) -> int:
+def _td32_procedure_code_size(
+    image: Image,
+    address: int,
+    symbol: SymbolsEntry,
+) -> int:
     """Recover executable size from a TD32 procedure's epilogue boundary.
 
     Delphi can include local literal data in the S_GPROC32/S_LPROC32 lexical
@@ -473,14 +477,65 @@ def _td32_procedure_code_size(image: Image, address: int, symbol: SymbolsEntry) 
         return symbol.size
 
     disassembler = Cs(CS_ARCH_X86, CS_MODE_32)
+    epilogue_size: int | None = None
     for instruction in disassembler.disasm(raw, address + debug_end):
         if instruction.mnemonic.startswith("ret"):
             code_size = instruction.address + instruction.size - address
             if debug_end < code_size <= symbol.size:
-                return code_size
+                epilogue_size = code_size
             break
 
-    return symbol.size
+    if epilogue_size is None:
+        return symbol.size
+
+    # ``debug_end`` normally identifies the one shared epilogue, but Delphi
+    # also emits routines with multiple returns.  A conditional branch can
+    # legitimately jump past the first return (BoolToStr is one stock RTL
+    # example).  Follow direct control-flow edges from the entry so such tails
+    # remain part of the procedure while unreachable trailing literal data is
+    # still excluded.
+    try:
+        procedure = image.read(address, symbol.size)
+    except (InvalidVirtualAddressError, InvalidVirtualReadError, ValueError):
+        return epilogue_size
+
+    pending = [address]
+    visited: set[int] = set()
+    reachable_end = address
+    procedure_end = address + symbol.size
+    while pending:
+        current = pending.pop()
+        while address <= current < procedure_end and current not in visited:
+            decoded = next(
+                disassembler.disasm(procedure[current - address :], current, count=1),
+                None,
+            )
+            if decoded is None:
+                break
+
+            visited.add(current)
+            next_address = current + decoded.size
+            reachable_end = max(reachable_end, next_address)
+            mnemonic = decoded.mnemonic.lower()
+
+            if mnemonic.startswith("ret"):
+                break
+
+            if mnemonic.startswith("j"):
+                try:
+                    target = int(decoded.op_str, 0)
+                except ValueError:
+                    target = None
+
+                if target is not None and address <= target < procedure_end:
+                    pending.append(target)
+
+                if mnemonic == "jmp":
+                    break
+
+            current = next_address
+
+    return max(epilogue_size, reachable_end - address)
 
 
 class DelphiTd32Parser:

@@ -7,7 +7,9 @@ from reccmp.compare.event import ReccmpEvent, ReccmpReportProtocol
 from reccmp.compare.functions import (
     FunctionComparator,
     EntityCompareResult,
+    create_unresolved_operand_lookup,
 )
+from reccmp.compare.asm.parse import ParseAsm
 from reccmp.compare.lines import LinesDb
 from reccmp.types import EntityType, ImageId
 from .raw_image import RawImage
@@ -162,6 +164,115 @@ def test_simple_nontrivial_diff(
         ("0x406", "mov word ptr [ebp - 0x10], 0"),
         ("0x40c", "mov edx, dword ptr [ecx + 0x14]"),
     ]
+
+
+def test_explicit_original_range_extends_over_identical_rebuilt_tail(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    code = b"\xc3AMPM"
+    comp = FunctionComparator(
+        db,
+        lines_db,
+        RawImage.from_memory(code),
+        RawImage.from_memory(code),
+        report,
+    )
+    result = comp.compare_function(
+        ReccmpMatch(
+            0,
+            0,
+            {
+                "type": EntityType.FUNCTION,
+                "name": "Unit.AppendFormat",
+                "orig_size": len(code),
+                "recomp_size": 1,
+                "recomp_max_size": 1,
+                "delphi_lexical_size": len(code),
+            },
+        )
+    )
+
+    assert result.match_ratio == 1.0
+    assert result.orig_size == len(code)
+    assert result.recomp_size == len(code)
+
+
+def test_explicit_original_range_does_not_absorb_different_rebuilt_tail(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    orig = b"\xc3AMPM"
+    recomp = b"\xc3NOPE"
+    comp = FunctionComparator(
+        db,
+        lines_db,
+        RawImage.from_memory(orig),
+        RawImage.from_memory(recomp),
+        report,
+    )
+    result = comp.compare_function(
+        ReccmpMatch(
+            0,
+            0,
+            {
+                "type": EntityType.FUNCTION,
+                "name": "Unit.NotATable",
+                "orig_size": len(orig),
+                "recomp_size": 1,
+                "recomp_max_size": len(recomp),
+            },
+        )
+    )
+
+    assert result.recomp_size == 1
+
+
+def test_immediate_inside_data_range_requires_relocation_site():
+    code = b"\xb8\x00\x02\x00\x00"  # mov eax, 0x200
+    without_reloc = ParseAsm(
+        addr_test=lambda _value: True,
+        relocation_test=lambda _addr, _size: False,
+    )
+    with_reloc = ParseAsm(
+        addr_test=lambda _value: True,
+        relocation_test=lambda _addr, _size: True,
+    )
+
+    assert without_reloc.parse_asm(code, 0) == [(0, "mov eax, 0x200")]
+    assert with_reloc.parse_asm(code, 0) == [(0, "mov eax, <OFFSET1>")]
+
+
+def test_unresolved_operand_telemetry_is_limited_to_external_data():
+    unresolved_external_data = ParseAsm(
+        relocation_test=lambda _addr, _size: True,
+        unresolved_operand_test=lambda _addr: True,
+    )
+    unresolved_external_data.parse_asm(b"\xb8\x00\x10\x00\x00", 0)
+    assert unresolved_external_data.unresolved_operands == [0x1000]
+
+    unnamed_code_target = ParseAsm(
+        unresolved_operand_test=lambda _addr: True,
+    )
+    unnamed_code_target.parse_asm(b"\xe8\xfb\x0f\x00\x00", 0)
+    assert not unnamed_code_target.unresolved_operands
+
+    function_local_table = ParseAsm(
+        relocation_test=lambda _addr, _size: True,
+        unresolved_operand_test=lambda _addr: True,
+    )
+    function_local_table.parse_asm(b"\xb8\x05\x00\x00\x00\xc3", 0)
+    assert not function_local_table.unresolved_operands
+
+
+def test_unresolved_operand_ignores_image_alignment_holes(db: EntityDb):
+    image = Mock(spec=[])
+    image.is_valid_vaddr = Mock(return_value=True)
+    section = Mock(spec=[])
+    section.contains_vaddr = Mock(return_value=False)
+    image.sections = [section]
+
+    lookup = create_unresolved_operand_lookup(db, ImageId.RECOMP, image)
+
+    assert not lookup(0x01000000)
 
 
 # Based on BETA10 0x1013e673
