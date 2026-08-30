@@ -38,6 +38,8 @@ def test_sblock32():
     assert len(parser.symbols) == 1
     assert len(parser.symbols[0].symbols) == 8
     assert parser.symbols[0].symbols[0].data_type == CvdumpTypeKey(0x10EC)
+    assert parser.symbols[0].debug_start == 0xC
+    assert parser.symbols[0].debug_end == 0x35C
 
 
 LOCAL_PROC = """

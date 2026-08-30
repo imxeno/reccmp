@@ -39,6 +39,8 @@ class SymbolsEntry:
     static_variables: list[LdataEntry] = field(default_factory=list)
     frame_pointer_present: bool = False
     addr: int | None = None  # Absolute address. Will be set later, if at all
+    debug_start: int | None = None
+    debug_end: int | None = None
 
 
 class CvdumpSymbolsParser:
@@ -137,8 +139,9 @@ class CvdumpSymbolsParser:
             # We do not need this info at the moment, might be useful in the future
             pass
         elif (match := self._debug_start_end_regex.match(line)) is not None:
-            # We do not need this info at the moment, might be useful in the future
-            pass
+            if self.current_function is not None:
+                self.current_function.debug_start = int(match.group("debug_start"), 16)
+                self.current_function.debug_end = int(match.group("debug_end"), 16)
         elif (match := self._flags_frame_pointer_regex.match(line)) is not None:
             if self.current_function is None:
                 logger.error(

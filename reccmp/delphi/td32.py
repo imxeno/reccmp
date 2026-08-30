@@ -18,6 +18,8 @@ import re
 import struct
 from typing import NamedTuple, cast
 
+from capstone import CS_ARCH_X86, CS_MODE_32, Cs  # type: ignore
+
 from reccmp.cvdump.analysis import CvdumpAnalysis, CvdumpNode
 from reccmp.cvdump.cvinfo import CVInfoTypeEnum, CvdumpTypeKey
 from reccmp.cvdump.cvinfo import CvdumpTypeMap
@@ -39,7 +41,7 @@ from reccmp.cvdump.types import (
     VirtualBaseClass,
     VirtualBasePointer,
 )
-from reccmp.formats import PEImage, detect_image
+from reccmp.formats import Image, PEImage, detect_image
 from reccmp.formats.exceptions import (
     InvalidVirtualAddressError,
     InvalidVirtualReadError,
@@ -450,6 +452,35 @@ def qualify_delphi_function_name(owner_unit: str, name: str | None) -> str | Non
         name = "Finalization"
 
     return f"{owner_unit}.{name}"
+
+
+def _td32_procedure_code_size(image: Image, address: int, symbol: SymbolsEntry) -> int:
+    """Recover executable size from a TD32 procedure's epilogue boundary.
+
+    Delphi can include local literal data in the S_GPROC32/S_LPROC32 lexical
+    span. ``debug_end`` points at the epilogue, so the first return reached by
+    linear decoding from there is the end of executable code. If that evidence
+    is absent or malformed, preserve the compiler-reported span.
+    """
+
+    debug_end = symbol.debug_end
+    if debug_end is None or debug_end < 0 or debug_end >= symbol.size:
+        return symbol.size
+
+    try:
+        raw = image.read(address + debug_end, symbol.size - debug_end)
+    except (InvalidVirtualAddressError, InvalidVirtualReadError, ValueError):
+        return symbol.size
+
+    disassembler = Cs(CS_ARCH_X86, CS_MODE_32)
+    for instruction in disassembler.disasm(raw, address + debug_end):
+        if instruction.mnemonic.startswith("ret"):
+            code_size = instruction.address + instruction.size - address
+            if debug_end < code_size <= symbol.size:
+                return code_size
+            break
+
+    return symbol.size
 
 
 class DelphiTd32Parser:
@@ -1075,8 +1106,8 @@ class DelphiTd32Parser:
         reader.u32()  # end
         reader.u32()  # next
         size = reader.u32()
-        reader.u32()  # debug start
-        reader.u32()  # debug end
+        debug_start = reader.u32()
+        debug_end = reader.u32()
         offset = reader.u32()
         section = reader.u16()
 
@@ -1100,6 +1131,8 @@ class DelphiTd32Parser:
             func_type=func_type,
             name=name or "",
             frame_pointer_present=True,
+            debug_start=debug_start,
+            debug_end=debug_end,
         )
         self.symbols.append(self._current_function)
 
@@ -1443,8 +1476,23 @@ class DelphiTd32Analysis(CvdumpAnalysis):
         self._image = image
         self._map_analysis = map_analysis
         super().__init__(parser)  # type: ignore[arg-type]
+        self._apply_delphi_function_code_sizes()
         self._apply_owner_units()
         self._apply_delphi_vtables()
+
+    def _apply_delphi_function_code_sizes(self):
+        if self._image is None:
+            return
+
+        for node in self.nodes:
+            symbol = node.symbol_entry
+            if node.node_type != EntityType.FUNCTION or symbol is None:
+                continue
+
+            address = self._image.get_abs_addr(symbol.section, symbol.offset)
+            node.confirmed_size = _td32_procedure_code_size(
+                self._image, address, symbol
+            )
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DelphiTd32Analysis":

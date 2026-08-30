@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from reccmp.cvdump.analysis import CvdumpNode
 from reccmp.cvdump.cvinfo import CVInfoTypeEnum, CvdumpTypeKey
+from reccmp.cvdump.symbols import SymbolsEntry
 from reccmp.delphi import (
     DelphiMapAnalysis,
     DelphiTd32Analysis,
@@ -15,6 +16,7 @@ from reccmp.delphi import (
 )
 from reccmp.delphi.td32 import (
     Td32SourceRange,
+    _td32_procedure_code_size,
     decode_td32_call_convention,
     extract_td32_stream,
     normalize_delphi_name,
@@ -24,6 +26,7 @@ from reccmp.project.config import BuildFile
 from reccmp.project.detect import DetectWhat, detect_project
 from reccmp.formats import PEImage
 from reccmp.types import EntityType
+from .raw_image import RawImage
 
 
 def _align4(data: bytearray):
@@ -459,6 +462,8 @@ def test_delphi_td32_analysis_creates_reccmp_nodes():
     assert functions[0].owner_unit == "Unit1"
     assert functions[0].confirmed_size == 0x30
     assert functions[0].symbol_entry is not None
+    assert functions[0].symbol_entry.debug_start == 0
+    assert functions[0].symbol_entry.debug_end == 0x30
     assert functions[0].symbol_entry.symbols[0].name == "LocalValue"
 
     data_nodes = [node for node in analysis.nodes if node.node_type == EntityType.DATA]
@@ -472,6 +477,22 @@ def test_delphi_td32_analysis_creates_reccmp_nodes():
     vtables = [node for node in analysis.nodes if node.node_type == EntityType.VTABLE]
     assert len(vtables) == 1
     assert vtables[0].friendly_name == "Unit1.TWidget"
+
+
+def test_delphi_td32_procedure_size_excludes_trailing_literal_data():
+    code = b"\x55\x8b\xec\x5d\xc2\x08\x00" + b"\x00\x00\x00C\x00\x00\x00"
+    symbol = SymbolsEntry(
+        type="S_GPROC32",
+        section=1,
+        offset=0,
+        size=len(code),
+        func_type=CvdumpTypeKey(0x1004),
+        name="DateTimeToString",
+        debug_start=0,
+        debug_end=3,
+    )
+
+    assert _td32_procedure_code_size(RawImage.from_memory(code), 0, symbol) == 7
 
 
 def test_delphi_td32_analysis_qualifies_unit_lifecycle_names():
