@@ -316,6 +316,58 @@ def test_match_array_array_of_structs(db: EntityDb, types_db: CvdumpTypesParser)
     assert recomp_sizes == [16, 4, 4, 4]
 
 
+def test_match_array_array_of_structs_with_sizeless_member_is_opaque(
+    db: EntityDb, types_db: CvdumpTypesParser
+):
+    """Do not partially expand an aggregate when one member has no storage size."""
+    types_db.keys[TK(0x1000)] = {
+        "type": "LF_ARRAY",
+        "array_type": TK(0x1001),
+        "size": 16,
+    }
+    types_db.keys[TK(0x1001)] = {
+        "type": "LF_STRUCTURE",
+        "field_list_type": TK(0x1002),
+        "size": 8,
+    }
+    types_db.keys[TK(0x1002)] = {
+        "type": "LF_FIELDLIST",
+        "members": [
+            FieldListItem(offset=0, name="value", type=CVInfoTypeEnum.T_REAL32),
+            FieldListItem(offset=4, name="callback", type=TK(0x1003)),
+        ],
+    }
+    types_db.keys[TK(0x1003)] = {
+        "type": "LF_PROCEDURE",
+    }
+
+    with db.batch() as batch:
+        batch.set(
+            ImageId.RECOMP,
+            100,
+            name="test",
+            type=EntityType.DATA,
+            data_type=0x1000,
+            size=16,
+        )
+        batch.match(100, 100)
+
+    match_array_elements(db, types_db)
+
+    orig = db.get(ImageId.ORIG, 100)
+    recomp = db.get(ImageId.RECOMP, 100)
+    assert orig is not None and recomp is not None
+    assert orig.name == recomp.name == "test"
+    assert orig.any_size(ImageId.ORIG) == 16
+    assert recomp.any_size(ImageId.RECOMP) == 16
+
+    # Atomic fallback: neither the valid first member nor later elements were added.
+    assert db.get(ImageId.ORIG, 104) is None
+    assert db.get(ImageId.RECOMP, 104) is None
+    assert db.get(ImageId.ORIG, 108) is None
+    assert db.get(ImageId.RECOMP, 108) is None
+
+
 def test_match_array_array_of_arrays(db: EntityDb, types_db: CvdumpTypesParser):
     """For a multi-dimensional array, create entities for one level."""
     types_db.keys[TK(0x1000)] = {

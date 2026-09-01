@@ -241,6 +241,42 @@ def test_immediate_inside_data_range_requires_relocation_site():
     assert with_reloc.parse_asm(code, 0) == [(0, "mov eax, <OFFSET1>")]
 
 
+def test_matching_immediate_inside_opaque_data_range(
+    db: EntityDb, lines_db: LinesDb, report: ReccmpReportProtocol
+):
+    """Matched aggregate bases prove equal references to the same interior offset."""
+    with db.batch() as batch:
+        batch.set(
+            ImageId.ORIG,
+            0x1000,
+            name="aggregate",
+            type=EntityType.DATA,
+            size=16,
+        )
+        batch.set(
+            ImageId.RECOMP,
+            0x2000,
+            name="aggregate",
+            type=EntityType.DATA,
+            size=16,
+        )
+        batch.match(0x1000, 0x2000)
+
+    orig = b"\xb8\x08\x10\x00\x00\xc3"  # mov eax, 0x1008; ret
+    recomp = b"\xb8\x08\x20\x00\x00\xc3"  # mov eax, 0x2008; ret
+    result = compare_functions(
+        db,
+        lines_db,
+        orig,
+        recomp,
+        report,
+        is_relocated_addr=lambda addr: addr in (0x1008, 0x2008),
+    )
+
+    assert result.match_ratio == 1.0
+    assert not result.has_unresolved_operands
+
+
 def test_unresolved_operand_telemetry_is_limited_to_external_data():
     unresolved_external_data = ParseAsm(
         relocation_test=lambda _addr, _size: True,
