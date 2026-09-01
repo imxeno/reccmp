@@ -13,6 +13,7 @@ from reccmp.cvdump.demangler import (
     get_function_arg_string,
 )
 from reccmp.cvdump import CvdumpTypesParser
+from reccmp.cvdump.types import CvdumpTypeError
 from reccmp.cvdump.types import CvdumpTypeKey
 from reccmp.formats import PEImage
 from reccmp.types import EntityType, ImageId
@@ -74,10 +75,13 @@ def match_array_elements(db: EntityDb, types: CvdumpTypesParser):
     batch = db.batch()
 
     @cache
-    def get_type_size(type_key: CvdumpTypeKey) -> int:
-        type_ = types.get(type_key)
-        assert type_.size is not None, type_key
-        return type_.size
+    def get_type_size(type_key: CvdumpTypeKey) -> int | None:
+        try:
+            size = types.get(type_key).size
+        except CvdumpTypeError:
+            return None
+
+        return size if size is not None and size > 0 else None
 
     # Helper function
     # pylint: disable=too-many-positional-arguments
@@ -131,7 +135,13 @@ def match_array_elements(db: EntityDb, types: CvdumpTypesParser):
         if array_type_key is None:
             continue
 
-        data_type = types.get(type_key)
+        try:
+            data_type = types.get(type_key)
+            array_element_type = types.get(array_type_key)
+        except CvdumpTypeError:
+            # The matched DATA entity still describes a usable opaque range.
+            # Leave it intact when the debug type cannot be expanded safely.
+            continue
 
         # Check whether another orig variable appears before the end of the array in recomp.
         # If this happens we can still add all the recomp offsets, but do not attach the orig address
@@ -146,36 +156,61 @@ def match_array_elements(db: EntityDb, types: CvdumpTypesParser):
             )
             upper_bound = match.orig_addr + orig_max
 
-        array_element_type = types.get(array_type_key)
+        if data_type.members is None:
+            continue
 
-        assert data_type.members is not None
+        pending_matches: list[tuple[str, int, int, int, int, bool]] = []
+        expansion_supported = True
 
         for array_element in data_type.members:
             orig_element_base_addr = match.orig_addr + array_element.offset
             recomp_element_base_addr = match.recomp_addr + array_element.offset
             if array_element_type.members is None:
                 # If array of scalars
-                assert array_element_type.size is not None
-                _add_match_in_array(
-                    f"{match.name}{array_element.name}",
-                    array_element_type.size,
-                    orig_element_base_addr,
-                    recomp_element_base_addr,
-                    upper_bound,
-                    array_element.offset == 0,
+                if array_element_type.size is None or array_element_type.size <= 0:
+                    expansion_supported = False
+                    break
+                pending_matches.append(
+                    (
+                        f"{match.name}{array_element.name}",
+                        array_element_type.size,
+                        orig_element_base_addr,
+                        recomp_element_base_addr,
+                        upper_bound,
+                        array_element.offset == 0,
+                    )
                 )
 
             else:
                 # Else: multidimensional array or array of structs
                 for member in array_element_type.members:
-                    _add_match_in_array(
-                        f"{match.name}{array_element.name}.{member.name}",
-                        get_type_size(member.type),
-                        orig_element_base_addr + member.offset,
-                        recomp_element_base_addr + member.offset,
-                        upper_bound,
-                        array_element.offset + member.offset == 0,
+                    member_size = get_type_size(member.type)
+                    if member_size is None:
+                        expansion_supported = False
+                        break
+                    pending_matches.append(
+                        (
+                            f"{match.name}{array_element.name}.{member.name}",
+                            member_size,
+                            orig_element_base_addr + member.offset,
+                            recomp_element_base_addr + member.offset,
+                            upper_bound,
+                            array_element.offset + member.offset == 0,
+                        )
                     )
+                if not expansion_supported:
+                    break
+
+        if not expansion_supported:
+            logger.debug(
+                "Keeping array variable %s at 0x%x as an opaque DATA range",
+                match.name,
+                match.recomp_addr,
+            )
+            continue
+
+        for pending_match in pending_matches:
+            _add_match_in_array(*pending_match)
 
     batch.commit()
 
