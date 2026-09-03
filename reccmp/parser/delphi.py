@@ -380,7 +380,11 @@ class DelphiParser:
         if self.var_markers.insert(marker):
             self._syntax_warning(AlertCode.DUPLICATE_MODULE)
 
-        if self.state in (ReaderState.IN_FUNC, ReaderState.IN_FUNC_GLOBAL):
+        if self.state in (
+            ReaderState.WANT_CURLY,
+            ReaderState.IN_FUNC,
+            ReaderState.IN_FUNC_GLOBAL,
+        ):
             self._resume_state_after_variable = self.state
             self.state = ReaderState.IN_FUNC_GLOBAL
         else:
@@ -410,12 +414,18 @@ class DelphiParser:
                 )
             else:
                 parent_function = None
-                is_static = self._resume_state_after_variable == ReaderState.IN_FUNC
+                is_static = self._resume_state_after_variable in (
+                    ReaderState.WANT_CURLY,
+                    ReaderState.IN_FUNC,
+                )
 
                 if is_static:
-                    fun_marker = self.fun_markers.query(
-                        MarkerCategory.FUNCTION, marker.module
+                    markers = (
+                        self.nested_fun_markers
+                        if self._nested_routine_pending
+                        else self.fun_markers
                     )
+                    fun_marker = markers.query(MarkerCategory.FUNCTION, marker.module)
                     if fun_marker is not None:
                         parent_function = fun_marker.offset
 
@@ -464,7 +474,10 @@ class DelphiParser:
             return
 
         if self.state == ReaderState.WANT_CURLY:
-            self._syntax_error(AlertCode.UNEXPECTED_MARKER)
+            if marker.is_string() or marker.is_variable():
+                self._variable_marker(marker)
+            else:
+                self._syntax_error(AlertCode.UNEXPECTED_MARKER)
             return
 
         if self.state == ReaderState.IN_FUNC and not marker.allowed_in_func():

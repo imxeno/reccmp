@@ -29,6 +29,90 @@ def test_delphi_function_range():
     assert parser.functions[0].end_line == 13
 
 
+def test_delphi_local_constants_before_function_body():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x1000
+        class function THash.SelfTest: Boolean;
+        const
+          // GLOBAL: TEST 0x2000
+          Test1Out: array[0..1] of Byte = ($01, $02);
+          // GLOBAL: TEST 0x3000
+          Test2Out: array[0..1] of Byte = ($03, $04);
+          // STRING: TEST 0x4000
+          Greeting = 'local value';
+        begin
+          Result := Test1Out[0] <> Test2Out[0];
+        end;
+        """))
+
+    assert len(parser.alerts) == 0
+    assert len(parser.functions) == 1
+    assert parser.functions[0].line_number == 6
+    assert parser.functions[0].end_line == 16
+    assert len(parser.variables) == 2
+    assert [variable.name for variable in parser.variables] == [
+        "Unit1.Test1Out",
+        "Unit1.Test2Out",
+    ]
+    assert all(variable.is_static for variable in parser.variables)
+    assert all(variable.parent_function == 0x1000 for variable in parser.variables)
+    assert len(parser.strings) == 1
+    assert parser.strings[0].name == "local value"
+
+
+def test_delphi_nested_local_constant_uses_nested_parent():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x1000
+        procedure Outer;
+          // NESTED: TEST 0x2000
+          procedure Inner;
+          const
+            // GLOBAL: TEST 0x3000
+            InnerValue: Integer = 1;
+          begin
+          end;
+        begin
+        end;
+        """))
+
+    assert len(parser.alerts) == 0
+    assert len(parser.variables) == 1
+    assert parser.variables[0].name == "Unit1.InnerValue"
+    assert parser.variables[0].is_static is True
+    assert parser.variables[0].parent_function == 0x2000
+
+
+def test_delphi_rejects_unrelated_marker_before_function_body():
+    parser = DelphiParser()
+    parser.read(dedent("""\
+        unit Unit1;
+
+        implementation
+
+        // FUNCTION: TEST 0x1000
+        procedure Work;
+          // VTABLE: TEST 0x2000
+          TThing = class
+          end;
+        begin
+        end;
+        """))
+
+    assert len(parser.alerts) == 1
+    assert parser.alerts[0].code == AlertCode.UNEXPECTED_MARKER
+    assert len(parser.vtables) == 0
+
+
 def test_delphi_global_and_string():
     parser = DelphiParser()
     parser.read(dedent("""\
