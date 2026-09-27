@@ -116,8 +116,15 @@ procedure TMainForm.LoadData;
 
   // NESTED: APP 0x004010f0
   procedure LoadOneRow(Index: Integer);
+
+    // NESTED: APP 0x00401080
+    procedure ReadField;
+    begin
+      // deeply nested helper implementation
+    end;
+
   begin
-    // local helper implementation
+    ReadField;
   end;
 
 begin
@@ -126,6 +133,8 @@ end;
 ```
 
 `reccmp` records the nested routine as a normal function annotation whose name comes from the local declaration. For Delphi TD32 builds, it can then bind that source range to the compiler-emitted local-procedure symbol and compare it directly.
+
+Local routines can nest to any depth, and intermediate helpers do not need their own markers. A routine containing local implementations has its source range start at its own `begin` or `asm`, excluding the local implementations. A routine without local implementations keeps its declaration as the start of its range. Local `GLOBAL` annotations belong to the immediately enclosing routine when it has a marker for the same module.
 
 #### `STUB`
 
