@@ -2,6 +2,7 @@
 
 import io
 import re
+from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Iterator
 
@@ -64,6 +65,37 @@ _variable_decl_regex = re.compile(
 _block_word_regex = re.compile(
     r"\b(begin|case|record|class|object|try|asm|end)\b", re.I
 )
+
+_comment_token_regex = re.compile(r"'(?:[^']|'')*'|//[^\r\n]*|\{|\(\*")
+
+
+def _strip_pascal_block_comments(
+    line: str, comment_end: str | None
+) -> tuple[str, str | None]:
+    """Remove block comments while preserving literals and annotation comments."""
+    result = []
+    pos = 0
+    while pos < len(line):
+        if comment_end is not None:
+            end = line.find(comment_end, pos)
+            if end == -1:
+                break
+            pos = end + len(comment_end)
+            comment_end = None
+        elif (match := _comment_token_regex.search(line, pos)) is not None:
+            result.append(line[pos : match.start()])
+            token = match.group()
+            if token in ("{", "(*"):
+                comment_end = "}" if token == "{" else "*)"
+                result.append(" ")
+            else:
+                result.append(token)
+            pos = match.end()
+        else:
+            result.append(line[pos:])
+            break
+
+    return "".join(result), comment_end
 
 
 def _strip_pascal_comments_and_strings(line: str) -> str:
@@ -154,7 +186,18 @@ def _get_pascal_variable_name(line: str) -> str | None:
 
 def _has_no_implementation(line: str) -> bool:
     sanitized = _strip_pascal_comments_and_strings(line).lower()
-    return " forward;" in sanitized or " external" in sanitized
+    return re.search(r"(?:^|;)\s*(?:forward\s*;|external\b)", sanitized) is not None
+
+
+@dataclass
+class _NestedRoutine:
+    """Declaration and body state for one local routine, marked or unmarked."""
+
+    markers: MarkerDict
+    start: int
+    name: str
+    body_depth: int = 0
+    has_nested_routines: bool = False
 
 
 class DelphiParser:
@@ -178,16 +221,13 @@ class DelphiParser:
 
         self.function_start = 0
         self.function_sig = ""
-        self.nested_function_start = 0
-        self.nested_function_sig = ""
         self.function_body_depth = 0
         self.unit_name: str | None = None
         self._resume_state_after_variable: ReaderState | None = None
 
-        self._nested_routine_pending = False
-        self._nested_routine_depth = 0
+        self._nested_routines: list[_NestedRoutine] = []
         self._nested_routine_seen = False
-        self._nested_function_active = False
+        self._comment_end: str | None = None
 
     def reset_and_set_filename(self, filename: PurePath):
         self._symbols = []
@@ -204,15 +244,12 @@ class DelphiParser:
 
         self.function_start = 0
         self.function_sig = ""
-        self.nested_function_start = 0
-        self.nested_function_sig = ""
         self.function_body_depth = 0
         self.unit_name = None
         self._resume_state_after_variable = None
-        self._nested_routine_pending = False
-        self._nested_routine_depth = 0
+        self._nested_routines.clear()
         self._nested_routine_seen = False
-        self._nested_function_active = False
+        self._comment_end = None
 
     @property
     def functions(self) -> list[ParserFunction]:
@@ -243,10 +280,8 @@ class DelphiParser:
         self.tbl_markers.empty()
         self.function_body_depth = 0
         self._resume_state_after_variable = None
-        self._nested_routine_pending = False
-        self._nested_routine_depth = 0
+        self._nested_routines.clear()
         self._nested_routine_seen = False
-        self._nested_function_active = False
 
     def _syntax_warning(self, code: AlertCode):
         self.alerts.append(
@@ -337,22 +372,18 @@ class DelphiParser:
         self.fun_markers.empty()
         self.function_body_depth = 0
         self.state = ReaderState.SEARCH
-        self._nested_routine_pending = False
-        self._nested_routine_depth = 0
+        self.nested_fun_markers.empty()
+        self._nested_routines.clear()
         self._nested_routine_seen = False
-        self._nested_function_active = False
 
     def _nested_function_done(self):
+        routine = self._nested_routines.pop()
         self._append_function_symbols(
-            self.nested_fun_markers,
-            self.nested_function_start,
-            self.nested_function_sig,
+            routine.markers,
+            routine.start,
+            routine.name,
             self.line_number,
         )
-        self.nested_fun_markers.empty()
-        self.nested_function_start = 0
-        self.nested_function_sig = ""
-        self._nested_function_active = False
 
     def _vtable_marker(self, marker: DecompMarker):
         if self.tbl_markers.insert(marker):
@@ -421,8 +452,8 @@ class DelphiParser:
 
                 if is_static:
                     markers = (
-                        self.nested_fun_markers
-                        if self._nested_routine_pending
+                        self._nested_routines[-1].markers
+                        if self._nested_routines
                         else self.fun_markers
                     )
                     fun_marker = markers.query(MarkerCategory.FUNCTION, marker.module)
@@ -467,7 +498,9 @@ class DelphiParser:
 
     def _handle_marker(self, marker: DecompMarker):
         if marker.is_nested_function():
-            if self.state == ReaderState.WANT_CURLY:
+            if self.state == ReaderState.WANT_CURLY and not (
+                self._nested_routines and self._nested_routines[-1].body_depth > 0
+            ):
                 self._nested_function_marker(marker)
             else:
                 self._syntax_warning(AlertCode.INCOMPATIBLE_MARKER)
@@ -561,37 +594,32 @@ class DelphiParser:
             self._function_done()
 
     def _update_waiting_for_outer_body(self, line: str):
-        if self._nested_routine_depth > 0:
-            self._nested_routine_depth += self._block_delta(line)
-            if self._nested_routine_depth <= 0:
-                if self._nested_function_active:
-                    self._nested_function_done()
-                self._nested_routine_pending = False
-                self._nested_routine_depth = 0
-            return
-
-        if self._nested_routine_pending:
-            if self._has_block_start(line):
-                self._nested_routine_seen = True
-                self._nested_routine_depth = self._block_delta(line)
-                if self._nested_routine_depth <= 0:
-                    if self._nested_function_active:
-                        self._nested_function_done()
-                    self._nested_routine_pending = False
-                    self._nested_routine_depth = 0
+        routine = self._nested_routines[-1] if self._nested_routines else None
+        if routine is not None and routine.body_depth > 0:
+            routine.body_depth += self._block_delta(line)
+            if routine.body_depth <= 0:
+                self._nested_function_done()
             return
 
         sanitized = _strip_pascal_comments_and_strings(line)
         if (match := _routine_decl_regex.match(sanitized)) is not None:
-            self._nested_routine_pending = True
-            if self._has_nested_function_marker():
-                self.nested_function_sig = self._qualify_name(match.group("name"))
-                self.nested_function_start = self.line_number
-                if _has_no_implementation(line):
+            if _has_no_implementation(line):
+                if self._has_nested_function_marker():
                     self._syntax_warning(AlertCode.NO_IMPLEMENTATION)
-                    self.nested_fun_markers.empty()
-                else:
-                    self._nested_function_active = True
+                self.nested_fun_markers.empty()
+                return
+
+            routine = _NestedRoutine(
+                markers=self.nested_fun_markers,
+                start=self.line_number,
+                name=self._qualify_name(match.group("name")),
+            )
+            self._nested_routines.append(routine)
+            self.nested_fun_markers = MarkerDict()
+        elif routine is not None and _has_no_implementation(line):
+            if next(routine.markers.iter(), None) is not None:
+                self._syntax_warning(AlertCode.NO_IMPLEMENTATION)
+            self._nested_routines.pop()
             return
 
         if self._has_nested_function_marker() and sanitized.strip():
@@ -599,9 +627,21 @@ class DelphiParser:
             self.nested_fun_markers.empty()
 
         if self._has_block_start(line):
-            if self._nested_routine_seen:
-                self.function_start = self.line_number
-            self._start_or_update_function_body(line)
+            if routine is not None:
+                # Count implemented children only; forward declarations have no range.
+                if len(self._nested_routines) > 1:
+                    self._nested_routines[-2].has_nested_routines = True
+                else:
+                    self._nested_routine_seen = True
+                if routine.has_nested_routines:
+                    routine.start = self.line_number
+                routine.body_depth = self._block_delta(line)
+                if routine.body_depth <= 0:
+                    self._nested_function_done()
+            else:
+                if self._nested_routine_seen:
+                    self.function_start = self.line_number
+                self._start_or_update_function_body(line)
 
     def read_line(self, line: str):
         if self.state == ReaderState.DONE:
@@ -609,6 +649,11 @@ class DelphiParser:
 
         self.last_line = line
         self.line_number += 1
+
+        in_comment = self._comment_end is not None
+        line, self._comment_end = _strip_pascal_block_comments(line, self._comment_end)
+        if not line.strip() and (in_comment or self.last_line.strip()):
+            return
 
         marker = match_marker(line, aliases=self.aliases)
         if marker is not None:
