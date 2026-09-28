@@ -561,6 +561,7 @@ class DelphiTd32Parser:
         self._current_function: SymbolsEntry | None = None
         self._block_level = 0
         self._seen_publics: set[tuple[int, int, str]] = set()
+        self._declared_module_owners: set[int] = set()
         self._ambiguous_module_owners: set[int] = set()
         self._ambiguous_data_owners: set[tuple[int, int]] = set()
 
@@ -602,10 +603,12 @@ class DelphiTd32Parser:
         for entry in entries:
             if entry.subsection_type == SUBSECTION_TYPE_MODULE:
                 self.modules.append(entry)
+                self._read_module(self._subsection(stream, entry), entry.module_index)
 
-        # Source subsections establish the module-index-to-unit relationship used
-        # by module-scoped symbol subsections. Read all of them before symbols in
-        # case the TD32 directory places ALIGN_SYMBOLS first.
+        # Explicit module names take precedence over source filenames, which
+        # need not match a declared program/unit name. Source subsections supply
+        # the fallback owners and code ranges. Read both before symbols, even
+        # when the directory places ALIGN_SYMBOLS first.
         for entry in entries:
             if entry.subsection_type == SUBSECTION_TYPE_SOURCE_MODULE:
                 self._read_source_module(
@@ -1340,6 +1343,27 @@ class DelphiTd32Parser:
             )
         )
 
+    def _read_module(self, data: bytes, module_index: int):
+        """Read the declared owner from an sstModule record (TModuleInfo).
+
+        The 28-byte header stores a name-table index at offset 8, followed by
+        SegmentCount 12-byte segment descriptors. This identity is independent
+        of source paths and the output executable's filename.
+        """
+        if module_index <= 0 or len(data) < 28:
+            return
+
+        reader = BinaryReader(data)
+        reader.skip(4)  # overlay number and library index
+        segment_count = reader.u16()
+        reader.u16()  # debugging style
+        owner_unit = self.name(reader.u32())
+        if not owner_unit or len(data) < 28 + segment_count * 12:
+            return
+
+        self._declared_module_owners.add(module_index)
+        self._record_module_owner(module_index, owner_unit)
+
     def _read_source_module(self, data: bytes, module_index: int = 0):
         if len(data) < 4:
             return
@@ -1354,7 +1378,10 @@ class DelphiTd32Parser:
         if segment_count % 2:
             reader.skip(2)
 
-        owner_unit = self._source_module_owner_unit(data, file_offsets)
+        if module_index in self._declared_module_owners:
+            owner_unit = self.module_owner_units.get(module_index)
+        else:
+            owner_unit = self._source_module_owner_unit(data, file_offsets)
         if owner_unit is not None:
             self._record_module_owner(module_index, owner_unit)
             self.source_ranges.extend(
@@ -1384,7 +1411,7 @@ class DelphiTd32Parser:
             self.module_owner_units.pop(module_index, None)
             self._ambiguous_module_owners.add(module_index)
             logger.warning(
-                "Conflicting TD32 source owners for module %d: %s, %s",
+                "Conflicting TD32 module owners for module %d: %s, %s",
                 module_index,
                 previous_owner,
                 owner_unit,

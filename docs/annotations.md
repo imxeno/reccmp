@@ -226,6 +226,16 @@ In Delphi/Object Pascal:
 GlobalValue: Integer;
 ```
 
+For Delphi TD32 builds, symbol ownership uses the declared module name in
+the debug information's `sstModule` record. It does not assume the program
+name, source filename, target ID, and executable filename are interchangeable.
+For example, two targets can share a `program Launcher;` block and its
+`Launcher.GlobalValue` declaration while providing separate `GLOBAL` addresses.
+Each target is matched against its own debug information. Source filenames
+remain a fallback when no usable module-name record exists; conflicting
+declared module names are left unresolved. The record layout is documented in
+[JCL's TD32 reader](https://github.com/project-jedi/jcl/blob/master/jcl/source/windows/JclTD32.pas).
+
 ### Anonymous scalar constants
 
 A source constant does not always have separately named storage. For example,
