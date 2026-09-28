@@ -5,6 +5,7 @@ import struct
 from itertools import pairwise
 from typing import Callable, Iterator
 from reccmp.compare.lines import LinesDb
+from reccmp.compare.literals import create_literal_lookup
 from reccmp.compare.pinned_sequences import SequenceMatcherWithPins
 from reccmp.compare.asm.fixes import assert_fixup, find_effective_match
 from reccmp.compare.asm.parse import AsmExcerpt, ParseAsm
@@ -226,6 +227,7 @@ class FunctionComparator:
                 self.db, ImageId.ORIG, self.orig_bin
             ),
             is_32bit=self.is_32bit,
+            literal_lookup=create_literal_lookup(self.db, ImageId.ORIG, self.orig_bin),
         )
         self.recomp_sanitize = ParseAsm(
             addr_test=create_valid_addr_lookup(
@@ -243,6 +245,9 @@ class FunctionComparator:
                 self.db, ImageId.RECOMP, self.recomp_bin
             ),
             is_32bit=self.is_32bit,
+            literal_lookup=create_literal_lookup(
+                self.db, ImageId.RECOMP, self.recomp_bin
+            ),
         )
 
     def _source_ref_of_recomp_addr(self, recomp_addr: int | None) -> str | None:

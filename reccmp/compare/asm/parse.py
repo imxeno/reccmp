@@ -12,6 +12,7 @@ from typing import Callable, Iterable
 from typing_extensions import Buffer
 from .const import JUMP_MNEMONICS, SINGLE_OPERAND_INSTS
 from .instgen import InstructGen, SectionType
+from .literals import LiteralLookup, literal_read
 from .replacement import (
     AddrTestProtocol,
     NameReplacementProtocol,
@@ -52,6 +53,7 @@ class ParseAsm:
         relocation_site_lookup: Callable[[int, int], Iterable[int]] | None = None,
         unresolved_operand_test: Callable[[int], bool] | None = None,
         is_32bit: bool = True,
+        literal_lookup: LiteralLookup | None = None,
     ) -> None:
         self.addr_test = addr_test
         self.name_lookup = name_lookup
@@ -60,11 +62,13 @@ class ParseAsm:
         self.relocation_site_lookup = relocation_site_lookup
         self.unresolved_operand_test = unresolved_operand_test
         self.is_32bit = is_32bit
+        self.literal_lookup = literal_lookup
 
         self.replacements: dict[int, str] = {}
         self.indirect_replacements: dict[int, str] = {}
         self.unresolved_operands: list[int] = []
         self._active_range: range | None = None
+        self._active_code_ranges: tuple[range, ...] = ()
         self.number_placeholders = True
 
     def reset(self):
@@ -72,6 +76,7 @@ class ParseAsm:
         self.indirect_replacements = {}
         self.unresolved_operands = []
         self._active_range = None
+        self._active_code_ranges = ()
 
     def is_addr(self, value: int) -> bool:
         """Wrapper for user-provided address test"""
@@ -183,6 +188,26 @@ class ParseAsm:
         value = int(match.group(1), 16)
         return self.indirect_replace(value)
 
+    def _literal_suffix(self, inst: DisasmLiteInst) -> str:
+        if self.literal_lookup is None or (read := literal_read(inst)) is None:
+            return ""
+        addr, size = read
+        if self.lookup(addr) is not None:
+            return ""
+        if any(
+            addr < code.stop and addr + size > code.start
+            for code in self._active_code_ranges
+        ):
+            return ""
+        owner = self._active_range.start if self._active_range is not None else None
+        data = self.literal_lookup(addr, size, owner)
+        if data is None or len(data) != size:
+            return ""
+        # Keep the ordinary per-address placeholder: equal-valued literals at
+        # distinct addresses must not collapse into a single reference. Attach
+        # bytes per instruction, since another load may read a different width.
+        return f" ; literal bytes: {data.hex(' ')}"
+
     def sanitize(self, inst: DisasmLiteInst) -> tuple[str, str]:
         # For jumps or calls, if the entire op_str is a hex number, the value
         # is a relative offset.
@@ -250,7 +275,7 @@ class ParseAsm:
                 lambda match: self.hex_replace_relocated(match, inst), op_str
             )
 
-        return (inst.mnemonic, op_str)
+        return (inst.mnemonic, op_str + self._literal_suffix(inst))
 
     def parse_asm(self, data: Buffer, start_addr: int) -> AsmExcerpt:
         self.reset()
@@ -274,6 +299,14 @@ class ParseAsm:
             self.is_32bit,
             code_references=code_references,
             relocation_sites=relocation_sites,
+        )
+        self._active_code_ranges = tuple(
+            range(
+                section.contents[0].address,
+                section.contents[-1].address + section.contents[-1].size,
+            )
+            for section in ig.sections
+            if section.type == SectionType.CODE and section.contents
         )
 
         for section in ig.sections:

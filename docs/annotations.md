@@ -226,6 +226,24 @@ In Delphi/Object Pascal:
 GlobalValue: Integer;
 ```
 
+### Anonymous scalar constants
+
+A source constant does not always have separately named storage. For example,
+Delphi can emit an untyped set constant into an anonymous pool after a procedure.
+Do not add a `GLOBAL` marker solely to give that compiler-generated literal a name.
+
+For PE images, function comparison checks the bytes read by direct scalar loads
+(`mov`, `movzx`, `movsx`, `fld` and `fild`) from anonymous read-only storage. A diff
+shows these as, for example, `mov al, byte ptr [<OFFSET1>] ; literal bytes: 0e`.
+The literal may move between builds, but changing its value causes a difference.
+Distinct addresses retain distinct placeholders even when their contents match.
+
+This checks only the instruction's read width, not padding or an inferred whole
+constant pool. Named entities, writable storage, instruction ranges, relocated
+pointer contents, indexed or segmented reads, and address-taking are not covered
+by this check. Existing symbol matching still handles named references. A
+normalized function match does not establish identical raw addresses or PE layout.
+
 ## Strings
 
 String values should be annotated using the `STRING` marker, which includes the module name and address of the text content. Note that this is usually not required since most strings can be auto-detected. If you want, you can use this for bookkeeping, but it will usually not affect the `reccmp` match.
