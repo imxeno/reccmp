@@ -19,12 +19,15 @@ Parser = DecompParser | DelphiParser
 
 
 def get_parser_for_path(
-    path: PurePath, aliases: ProjectAliases | None = None
+    path: PurePath,
+    aliases: ProjectAliases | None = None,
+    defines: dict[str, bool] | None = None,
 ) -> Parser:
-    """Select a source parser based on the source file extension."""
+    """Select a source parser based on the source file extension.
+    ``defines`` (Delphi conditional symbols) apply to Pascal sources only."""
 
     if path.suffix.lower() in (".pas", ".dpr", ".dpk", ".inc"):
-        return DelphiParser(aliases)
+        return DelphiParser(aliases, defines)
 
     return DecompParser(aliases)
 
@@ -35,11 +38,12 @@ class DecompCodebase:
         files: Iterable[TextFile],
         module: str,
         aliases: ProjectAliases | None = None,
+        defines: dict[str, bool] | None = None,
     ) -> None:
         self._symbols: list[ParserSymbol] = []
 
         for f in files:
-            parser = get_parser_for_path(f.path, aliases)
+            parser = get_parser_for_path(f.path, aliases, defines)
             parser.reset_and_set_filename(f.path)
             parser.read(f.text)
 

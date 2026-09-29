@@ -95,6 +95,10 @@ class ProjectFileTarget(BaseModel):
         validation_alias=AliasChoices("marker-aliases", "marker_aliases"),
         default_factory=dict,
     )
+    # Delphi conditional symbols with their value for this target's build. The parser
+    # keeps only the compiled branch of {$IFDEF}/{$IFNDEF} on these symbols; any other
+    # conditional keeps both branches.
+    defines: dict[str, bool] = Field(default_factory=dict)
 
 
 class ProjectFile(YmlFileModel):

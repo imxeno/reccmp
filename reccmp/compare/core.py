@@ -95,6 +95,7 @@ class Compare:
     function_comparator: FunctionComparator
     data_sources: list[TextFile]
     project_aliases: ProjectAliases
+    defines: dict[str, bool]
 
     # pylint: disable=too-many-arguments
     # pylint: disable=too-many-positional-arguments
@@ -108,6 +109,7 @@ class Compare:
         code_files: list[TextFile] | None = None,
         data_sources: list[TextFile] | None = None,
         project_aliases: ProjectAliases | None = None,
+        defines: dict[str, bool] | None = None,
     ):
         self.orig_bin = orig_bin
         self.recomp_bin = recomp_bin
@@ -116,6 +118,7 @@ class Compare:
         self.src_encoding = encoding or "utf-8"
         self.bin_encoding = encoding or "latin1"
         self.project_aliases = normalize_project_aliases(project_aliases or {})
+        self.defines = dict(defines or {})
 
         if isinstance(code_files, list):
             self.code_files = code_files
@@ -163,6 +166,7 @@ class Compare:
             self.bin_encoding,
             self.project_aliases,
             self.report,
+            self.defines,
         )
 
         load_data_sources(self._db, self.data_sources)
@@ -322,6 +326,7 @@ class Compare:
             data_sources=data_sources,
             code_files=code_files,
             project_aliases=project_aliases,
+            defines=target.defines,
         )
         compare.run()
         return compare

@@ -4,7 +4,7 @@ from pathlib import PurePath
 import pytest
 
 from reccmp.parser.error import AlertCode
-from reccmp.parser.delphi import DelphiParser
+from reccmp.parser.delphi import DelphiParser, blank_inactive_conditionals
 
 
 def test_delphi_function_range():
@@ -656,3 +656,83 @@ def test_delphi_nested_state_cleared_after_recovery_or_reset(reset):
     assert parser.functions[0].offset == 0x6000
     assert parser.functions[0].end_line == parser.line_number
     assert len(parser.alerts) == (0 if reset else 1)
+
+
+SPLIT_ROUTINE = """\
+unit Unit1;
+
+implementation
+
+// FUNCTION: TEST 0x1000
+procedure Render(Stage: Integer);
+{$IFDEF USE_GL}
+begin
+  glFlush;
+end;
+{$ELSE}
+var
+  Device: TObject;
+begin
+  {$IFDEF DEBUG} Log; {$ENDIF}
+  Device.Free;
+end;
+{$ENDIF}
+
+{$IFNDEF USE_GL}
+// FUNCTION: TEST 0x2000
+procedure DirectOnly;
+begin
+end;
+{$ENDIF}
+"""
+
+
+def test_delphi_without_defines_reads_the_first_body():
+    parser = DelphiParser()
+    parser.read(SPLIT_ROUTINE)
+
+    assert [(f.name, f.line_number, f.end_line) for f in parser.functions] == [
+        ("Unit1.Render", 6, 10),
+        ("Unit1.DirectOnly", 22, 24),
+    ]
+
+
+@pytest.mark.parametrize(
+    "defines, render_end, direct_only",
+    [({"USE_GL": True}, 10, False), ({"USE_GL": False}, 17, True)],
+)
+def test_delphi_defines_select_the_compiled_branch(defines, render_end, direct_only):
+    parser = DelphiParser(defines=defines)
+    parser.read(SPLIT_ROUTINE)
+
+    assert len(parser.alerts) == 0
+    functions = {f.name: (f.line_number, f.end_line) for f in parser.functions}
+    assert functions["Unit1.Render"] == (6, render_end)
+    assert ("Unit1.DirectOnly" in functions) == direct_only
+    if direct_only:
+        assert functions["Unit1.DirectOnly"] == (22, 24)
+
+
+def test_blank_inactive_conditionals_keeps_coordinates():
+    text = (
+        "// {$IFDEF USE_GL} in a comment is no directive\r\n"
+        "procedure B{$IFNDEF USE_GL}(Stage: Integer){$ENDIF};\r\n"
+        "const S = '{$ELSE}';\r\n"
+        "{$IFDEF USE_GL}\r\n"
+        "{$IFDEF OTHER} A; {$ELSE} B; {$ENDIF}\r\n"
+        "{$ENDIF}\r\n"
+    )
+
+    gl = blank_inactive_conditionals(text, {"use_gl": True})
+    dx = blank_inactive_conditionals(text, {"USE_GL": False})
+
+    assert blank_inactive_conditionals(text, {}) == text
+    assert len(gl) == len(dx) == len(text)
+    assert gl.splitlines()[1] == "procedure B{$IFNDEF USE_GL}" + " " * 16 + "{$ENDIF};"
+    assert gl.splitlines()[4] == "{$IFDEF OTHER} A; {$ELSE} B; {$ENDIF}"
+    assert dx.splitlines()[1] == "procedure B{$IFNDEF USE_GL}(Stage: Integer){$ENDIF};"
+    assert dx.splitlines()[2] == "const S = '{$ELSE}';"
+    assert (
+        dx.splitlines()[4]
+        == "{$IFDEF OTHER}" + " " * 4 + "{$ELSE}" + " " * 4 + "{$ENDIF}"
+    )

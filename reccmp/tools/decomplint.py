@@ -120,6 +120,11 @@ class DecomplintTarget:
     # Project-file only:
     project_file_path: Path | None = None
     aliases: dict[str, str] | None = None
+    # Delphi conditional symbols of the target's build (from the project file).
+    defines: dict[str, bool] | None = None
+
+    def defines_key(self) -> tuple[tuple[str, bool], ...]:
+        return tuple(sorted((self.defines or {}).items()))
 
 
 def decomplint_parse_args(
@@ -135,7 +140,17 @@ def decomplint_parse_args(
         module = args.target
         encoding = args.encoding
 
-        return (DecomplintTarget(paths, module, encoding),)
+        # A target named with explicit paths still builds with its project defines.
+        defines = None
+        if module is not None:
+            try:
+                project = RecCmpProject.from_directory(Path.cwd())
+            except RecCmpProjectException:
+                project = None
+            if project is not None and module in project.targets:
+                defines = project.targets[module].defines
+
+        return (DecomplintTarget(paths, module, encoding, defines=defines),)
 
     project = RecCmpProject.from_directory(Path.cwd())
     if not project:
@@ -160,14 +175,19 @@ def decomplint_parse_args(
                 encoding,
                 project_file_path=project.project_config_path,
                 aliases=target.marker_aliases,
+                defines=target.defines,
             )
         )
 
     return tuple(options)
 
 
-def parse_file(file: TextFile, aliases: ProjectAliases | None) -> ReccmpParserResult:
-    parser = get_parser_for_path(file.path, aliases)
+def parse_file(
+    file: TextFile,
+    aliases: ProjectAliases | None,
+    defines: dict[str, bool] | None = None,
+) -> ReccmpParserResult:
+    parser = get_parser_for_path(file.path, aliases, defines)
     parser.reset_and_set_filename(file.path)
     parser.read(file.text)
     parser.finish()
@@ -233,8 +253,12 @@ def lint_all_targets(lint_targets: tuple[DecomplintTarget, ...]) -> list[ParserA
     # Targets may share common directories, so deduplicate the paths.
     # In the unlikely event that the same path appears with different encodings,
     # try to open using each encoding and report an error if (when) this fails.
+    # Targets with different conditional defines read different text from one file,
+    # so the defines are part of the key.
     all_paths = set(
-        (path, target.encoding) for target in lint_targets for path in target.paths
+        (path, target.encoding, target.defines_key())
+        for target in lint_targets
+        for path in target.paths
     )
 
     # Collect all parser/linter alerts here and worry about sorting/collating later.
@@ -252,10 +276,12 @@ def lint_all_targets(lint_targets: tuple[DecomplintTarget, ...]) -> list[ParserA
 
     # Open each (path, encoding) combination once, then collect code annotations.
     parser_results = {}
-    for path, encoding in all_paths:
+    for path, encoding, defines in all_paths:
         try:
             file = TextFile.from_file(path, encoding=encoding)
-            parser_results[(path, encoding)] = parse_file(file, project_aliases)
+            parser_results[(path, encoding, defines)] = parse_file(
+                file, project_aliases, dict(defines)
+            )
 
         except FileNotFoundError:
             all_alerts.append(ParserAlert(code=AlertCode.FILE_NOT_FOUND, path=path))
@@ -270,19 +296,33 @@ def lint_all_targets(lint_targets: tuple[DecomplintTarget, ...]) -> list[ParserA
             )
 
     # For each parsed file: add alerts that should appear only once
-    for (path, _), result in parser_results.items():
-        # Add parser syntax errors.
-        all_alerts.extend(result.alerts)
-        # Add any errors from these linter checks.
-        all_alerts.extend(check_byname_allowed(result))
-        all_alerts.extend(check_function_order(result))
+    # A file read under several sets of defines reports a shared alert once.
+    seen_alerts = set()
+    for result in parser_results.values():
+        for alert in (
+            # Parser syntax errors, then the errors from these linter checks.
+            *result.alerts,
+            *check_byname_allowed(result),
+            *check_function_order(result),
+        ):
+            alert_key = (
+                alert.code,
+                alert.path,
+                alert.line_number,
+                alert.detail,
+                alert.target,
+            )
+            if alert_key not in seen_alerts:
+                seen_alerts.add(alert_key)
+                all_alerts.append(alert)
 
     # Lint each collection of files from each linter target.
     for target in lint_targets:
+        key = target.defines_key()
         parsed_files = [
-            parser_results[(path, target.encoding)]
+            parser_results[(path, target.encoding, key)]
             for path in target.paths
-            if (path, target.encoding) in parser_results
+            if (path, target.encoding, key) in parser_results
         ]
 
         scoped_alerts = lint_file_collections(parsed_files, module=target.module)

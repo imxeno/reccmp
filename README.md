@@ -35,6 +35,7 @@ Changes vs upstream:
 * Delphi type records needed for comparison and Ghidra import, including scalars, pointers, arrays, enums, records/classes/objects, fields, and method/function signatures.
 * Delphi VMT support using Pascal annotations plus TD32 type/symbol metadata, comparing the virtual-method pointer region instead of unrelated VMT runtime metadata.
 * Delphi local/nested procedure annotations with `// NESTED: ...` markers.
+* Per-target Delphi conditional symbols: `defines:` in a `reccmp-project.yml` target (for example `LBS_OPENGL: true`) makes the Pascal parser and `reccmp-decomplint` keep only the compiled branch of `{$IFDEF}`/`{$IFNDEF}` on those symbols, so one source tree can carry the markers of several builds. Other conditionals keep both branches; line numbers are unchanged.
 * Delphi name normalization for observed Delphi 7 TD32 symbols.
 * Delphi Win32 register calling convention support via a Ghidra `__borland_register` compiler-spec extension.
 

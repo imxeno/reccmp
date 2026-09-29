@@ -160,6 +160,31 @@ def test_project_marker_aliases():
     assert p.targets["TEST"].marker_aliases == {"fun": "FUNCTION"}
 
 
+def test_project_defines():
+    p = ProjectFile.from_str("""\
+        targets:
+            TEST:
+                hash:
+                    sha256: test
+                filename: test.exe
+        """)
+
+    assert not p.targets["TEST"].defines
+
+    p = ProjectFile.from_str("""\
+        targets:
+            TEST:
+                hash:
+                    sha256: test
+                filename: test.exe
+                defines:
+                    LBS_OPENGL: true
+                    DEBUG: false
+        """)
+
+    assert p.targets["TEST"].defines == {"LBS_OPENGL": True, "DEBUG": False}
+
+
 def test_build_file_symbols_alias():
     build = BuildFile.from_str("""\
         project: .

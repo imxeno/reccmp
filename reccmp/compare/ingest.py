@@ -191,9 +191,12 @@ def load_markers(
     encoding: str = "latin1",
     project_aliases: ProjectAliases | None = None,
     report: ReccmpReportProtocol = reccmp_report_nop,
+    defines: dict[str, bool] | None = None,
 ):
     lines_db.add_local_paths((f.path for f in code_files))
-    codebase = DecompCodebase(code_files, target_id, aliases=project_aliases)
+    codebase = DecompCodebase(
+        code_files, target_id, aliases=project_aliases, defines=defines
+    )
 
     # If the address of any annotation would cause an exception,
     # remove it and report an error.

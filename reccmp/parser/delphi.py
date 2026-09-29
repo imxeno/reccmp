@@ -68,6 +68,56 @@ _block_word_regex = re.compile(
 
 _comment_token_regex = re.compile(r"'(?:[^']|'')*'|//[^\r\n]*|\{|\(\*")
 
+_conditional_token_regex = re.compile(
+    r"//[^\r\n]*|'(?:''|[^'\r\n])*'|\(\*.*?\*\)"
+    r"|\{\$(?P<directive>IFDEF|IFNDEF|IFOPT|IFEND|IF|ELSE|ENDIF)\b[ \t]*(?P<arg>[^}]*)\}"
+    r"|\{[^}]*\}",
+    flags=re.I | re.S,
+)
+
+
+def blank_inactive_conditionals(text: str, defines: dict[str, bool]) -> str:
+    """Return ``text`` with the conditional branches a build with ``defines`` does not
+    compile replaced by spaces. Line breaks are kept, so line numbers and columns stay
+    those of the file (and of the compiler's line table). Only {$IFDEF}/{$IFNDEF} on a
+    symbol listed in ``defines`` are decided; every other conditional ({$IF}, {$IFOPT},
+    symbols from the compiler or include files) keeps both branches. The directives
+    themselves stay: the parser reads them as comments."""
+
+    values = {name.upper(): bool(value) for name, value in defines.items()}
+    frames: list[bool | None] = (
+        []
+    )  # per open conditional: branch compiled, or None if undecided
+    out: list[str] = []
+    position = 0
+
+    def blank(segment: str) -> str:
+        if any(frame is False for frame in frames):
+            return re.sub(r"[^\r\n]", " ", segment)
+        return segment
+
+    for match in _conditional_token_regex.finditer(text):
+        out.append(blank(text[position : match.start()]))
+        position = match.end()
+        directive = (match.group("directive") or "").upper()
+        if not directive:
+            out.append(blank(match.group(0)))
+            continue
+        out.append(match.group(0))
+        symbol = (match.group("arg").split() or [""])[0].upper()
+        if directive in ("IFDEF", "IFNDEF"):
+            value = values.get(symbol)
+            frames.append(None if value is None else value == (directive == "IFDEF"))
+        elif directive in ("IF", "IFOPT"):
+            frames.append(None)
+        elif directive == "ELSE":
+            if frames and frames[-1] is not None:
+                frames[-1] = not frames[-1]
+        elif frames:  # ENDIF / IFEND
+            frames.pop()
+    out.append(blank(text[position:]))
+    return "".join(out)
+
 
 def _strip_pascal_block_comments(
     line: str, comment_end: str | None
@@ -205,7 +255,11 @@ class DelphiParser:
 
     # pylint: disable=too-many-instance-attributes
 
-    def __init__(self, aliases: ProjectAliases | None = None) -> None:
+    def __init__(
+        self,
+        aliases: ProjectAliases | None = None,
+        defines: dict[str, bool] | None = None,
+    ) -> None:
         self._symbols: list[ParserSymbol] = []
         self.alerts: list[ParserAlert] = []
         self.line_number = 0
@@ -213,6 +267,8 @@ class DelphiParser:
         self.last_line = ""
         self.filename: PurePath = PurePath("")
         self.aliases = aliases or {}
+        # Conditional symbols of the build: see blank_inactive_conditionals.
+        self.defines = dict(defines or {})
 
         self.fun_markers = MarkerDict()
         self.nested_fun_markers = MarkerDict()
@@ -731,6 +787,8 @@ class DelphiParser:
                 self._vtable_done(match.group("name"), match.group("base"))
 
     def read(self, text: str):
+        if self.defines:
+            text = blank_inactive_conditionals(text, self.defines)
         for line in io.StringIO(text, newline=None):
             self.read_line(line)
 

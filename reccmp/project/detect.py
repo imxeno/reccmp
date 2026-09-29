@@ -176,6 +176,9 @@ class RecCmpPartialTarget:
 
     marker_aliases: dict[str, str] | None = None
 
+    # Delphi conditional symbols and their values for this target's build.
+    defines: dict[str, bool] | None = None
+
 
 @dataclass
 class RecCmpTarget:
@@ -216,6 +219,9 @@ class RecCmpTarget:
     data_sources: list[Path] = field(default_factory=list)
 
     marker_aliases: dict[str, str] = field(default_factory=dict)
+
+    # Delphi conditional symbols and their values for this target's build.
+    defines: dict[str, bool] = field(default_factory=dict)
 
 
 class RecCmpProject:
@@ -292,6 +298,7 @@ class RecCmpProject:
             ghidra_config=ghidra,
             data_sources=data_sources,
             marker_aliases=marker_aliases,
+            defines=target.defines or {},
             report_config=report,
         )
 
@@ -412,6 +419,7 @@ class RecCmpProject:
                 ghidra_config=ghidra,
                 data_sources=data_sources,
                 marker_aliases=target.marker_aliases,
+                defines=target.defines,
                 report_config=report,
             )
 
