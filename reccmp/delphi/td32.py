@@ -10,6 +10,7 @@ same structures populated by the cvdump/PDB path.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
 import logging
@@ -538,6 +539,25 @@ def _td32_procedure_code_size(
     return max(epilogue_size, reachable_end - address)
 
 
+def _module_main_file(
+    paths: list[PureWindowsPath], owner_unit: str | None
+) -> PureWindowsPath | None:
+    """The source file a TD32 source module compiles; its other files are
+    `{$I}` includes. Prefer the file named after the module's unit, then the
+    first Pascal project or unit file."""
+
+    if owner_unit is not None:
+        for path in paths:
+            if path.stem.casefold() == owner_unit.casefold():
+                return path
+
+    for path in paths:
+        if path.suffix.lower() in (".pas", ".dpr", ".dpk"):
+            return path
+
+    return None
+
+
 class DelphiTd32Parser:
     """Parse enough TD32 data to feed reccmp's existing PDB workflows."""
 
@@ -564,6 +584,12 @@ class DelphiTd32Parser:
         self._declared_module_owners: set[int] = set()
         self._ambiguous_module_owners: set[int] = set()
         self._ambiguous_data_owners: set[tuple[int, int]] = set()
+        # Per source module: its main source file and the line records of the
+        # files it includes, kept per module because an include file can be
+        # compiled into several units.
+        self._module_include_lines: list[
+            tuple[PureWindowsPath, list[LineValue], list[LineValue]]
+        ] = []
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "DelphiTd32Parser":
@@ -631,6 +657,67 @@ class DelphiTd32Parser:
                 SUBSECTION_TYPE_SOURCE_MODULE,
             ):
                 self._log_unhandled_subsection(entry.subsection_type)
+
+        self._alias_include_lines()
+
+    def _alias_include_lines(self):
+        """Give code compiled from an `{$I}` include inside a routine a line in
+        the including file as well.
+
+        Delphi records such code under the include file, so a routine whose
+        first statement comes from an include has no line of its own source
+        file at its entry. Each include line record that falls in a procedure
+        whose other records belong to the module's main file is repeated under
+        the main file, at the line of the nearest main record in the same
+        procedure (the preceding one if any). Records of procedures that lie
+        entirely in the include (routines declared in it) are left alone."""
+
+        procedures: dict[int, list[tuple[int, int]]] = {}
+        for symbol in self.symbols:
+            if symbol.type in ("S_GPROC32", "S_LPROC32") and symbol.size > 0:
+                procedures.setdefault(symbol.section, []).append(
+                    (symbol.offset, symbol.offset + symbol.size)
+                )
+        for ranges in procedures.values():
+            ranges.sort()
+        starts = {
+            section: [start for start, _ in ranges]
+            for section, ranges in procedures.items()
+        }
+
+        def containing_procedure(value: LineValue) -> tuple[int, int] | None:
+            ranges = procedures.get(value.section)
+            if not ranges:
+                return None
+            index = bisect_right(starts[value.section], value.offset) - 1
+            if index < 0 or value.offset >= ranges[index][1]:
+                return None
+            return ranges[index]
+
+        for main_path, main_values, include_values in self._module_include_lines:
+            if not include_values:
+                continue
+            ordered = sorted(main_values, key=lambda v: (v.section, v.offset))
+            keys = [(v.section, v.offset) for v in ordered]
+            aliases: list[LineValue] = []
+            for value in include_values:
+                procedure = containing_procedure(value)
+                if procedure is None:
+                    continue
+                start, end = procedure
+                index = bisect_right(keys, (value.section, value.offset)) - 1
+                nearest = None
+                if index >= 0 and ordered[index].section == value.section:
+                    if ordered[index].offset >= start:
+                        nearest = ordered[index]
+                if nearest is None and index + 1 < len(ordered):
+                    following = ordered[index + 1]
+                    if following.section == value.section and following.offset < end:
+                        nearest = following
+                if nearest is not None:
+                    aliases.append(value._replace(line_number=nearest.line_number))
+            if aliases:
+                self.lines.setdefault(main_path, []).extend(aliases)
 
     def _subsection(self, stream: bytes, entry: DirectoryEntry) -> bytes:
         end = entry.offset + entry.size
@@ -1395,10 +1482,33 @@ class DelphiTd32Parser:
                 if start < end
             )
 
+        module_lines: list[tuple[PureWindowsPath, list[LineValue]]] = []
         for file_offset in file_offsets:
             if file_offset >= len(data):
                 continue
-            self._read_source_file(data, file_offset)
+            file_lines = self._read_source_file(data, file_offset)
+            if file_lines is not None:
+                module_lines.append(file_lines)
+
+        main_path = _module_main_file([path for path, _ in module_lines], owner_unit)
+        if main_path is not None:
+            self._module_include_lines.append(
+                (
+                    main_path,
+                    [
+                        v
+                        for path, values in module_lines
+                        if path == main_path
+                        for v in values
+                    ],
+                    [
+                        v
+                        for path, values in module_lines
+                        if path != main_path
+                        for v in values
+                    ],
+                )
+            )
 
     def _record_module_owner(self, module_index: int, owner_unit: str):
         if module_index <= 0 or module_index in self._ambiguous_module_owners:
@@ -1444,7 +1554,9 @@ class DelphiTd32Parser:
 
         return None
 
-    def _read_source_file(self, data: bytes, file_offset: int):
+    def _read_source_file(
+        self, data: bytes, file_offset: int
+    ) -> tuple[PureWindowsPath, list[LineValue]] | None:
         reader = BinaryReader(data, file_offset)
         segment_count = reader.u16()
         filename = self.name(reader.u32())
@@ -1452,9 +1564,10 @@ class DelphiTd32Parser:
         reader.skip(segment_count * 8)
 
         if filename is None:
-            return
+            return None
 
         path = PureWindowsPath(filename)
+        values: list[LineValue] = []
         for line_offset in line_offsets:
             if line_offset >= len(data):
                 continue
@@ -1465,7 +1578,7 @@ class DelphiTd32Parser:
             offsets = [line_reader.u32() for _ in range(pair_count)]
             line_numbers = [line_reader.u16() for _ in range(pair_count)]
 
-            self.lines.setdefault(path, []).extend(
+            values.extend(
                 LineValue(
                     line_number=line_number,
                     section=section,
@@ -1473,6 +1586,9 @@ class DelphiTd32Parser:
                 )
                 for offset, line_number in zip(offsets, line_numbers)
             )
+
+        self.lines.setdefault(path, []).extend(values)
+        return path, values
 
     def _read_type_key(self, reader: BinaryReader) -> CvdumpTypeKey:
         return CvdumpTypeKey(reader.u32())

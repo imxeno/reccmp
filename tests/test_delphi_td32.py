@@ -743,3 +743,85 @@ def test_known_ignored_td32_type_leaf_does_not_log_unhandled(caplog):
 
     assert "Unhandled TD32 type leaf" not in caplog.text
     assert 0x0034 not in parser.unhandled_types
+
+
+def _include_symbols_subsection(names: dict[str, int]) -> bytes:
+    result = bytearray(struct.pack("<I", 0))
+
+    for offset, size, name_key in ((0x10, 0x20, "Run"), (0x30, 0x10, "Edge")):
+        proc_payload = (
+            struct.pack("<III", 0, 0, 0)
+            + struct.pack("<III", size, 0, size)
+            + struct.pack(
+                "<IHHII", offset, 1, 0, CVInfoTypeEnum.T_NOTYPE, names[name_key]
+            )
+            + struct.pack("<I", 0)
+        )
+        result += _symbol_record(0x0205, proc_payload)
+        result += _symbol_record(0x0006, b"")
+
+    return bytes(result)
+
+
+def _include_source_subsection(
+    files: list[tuple[int, list[tuple[int, int]]]],
+) -> bytes:
+    """One source module whose files are (name index, [(offset, line)])."""
+    header_size = 4 + 4 * len(files) + 8 + 2 + 2
+    file_offsets = []
+    blocks = bytearray()
+    for name_index, lines in files:
+        file_offsets.append(header_size + len(blocks))
+        line_offset = header_size + len(blocks) + 2 + 4 + 4 + 8
+        blocks += (
+            struct.pack("<HII", 1, name_index, line_offset)
+            + struct.pack("<II", 0x10, 0x40)
+            + struct.pack("<HH", 1, len(lines))
+            + b"".join(struct.pack("<I", offset) for offset, _ in lines)
+            + b"".join(struct.pack("<H", line) for _, line in lines)
+        )
+        _align4(blocks)
+
+    return (
+        struct.pack("<HH", len(files), 1)
+        + b"".join(struct.pack("<I", offset) for offset in file_offsets)
+        + struct.pack("<II", 0x10, 0x40)
+        + struct.pack("<H", 1)
+        + b"\0\0"
+        + bytes(blocks)
+    )
+
+
+def test_delphi_td32_include_lines_get_a_line_of_the_including_unit():
+    # Run's first statement (0x10) is compiled from Marker.inc, the rest of
+    # its body from Unit1.pas. Edge (0x30) is declared in Marker.inc.
+    names_list = ["C:\\src\\Unit1.pas", "C:\\src\\Marker.inc", "Run", "Edge"]
+    names = {"Unit1.pas": 1, "Marker.inc": 2, "Run": 3, "Edge": 4}
+    subsections = [
+        (0x0130, 0, _names_subsection(names_list)),
+        (0x0125, 1, _include_symbols_subsection(names)),
+        (
+            0x0127,
+            1,
+            _include_source_subsection(
+                [
+                    (names["Unit1.pas"], [(0x16, 21), (0x1A, 22), (0x2C, 23)]),
+                    (names["Marker.inc"], [(0x10, 7), (0x30, 3), (0x34, 4)]),
+                ]
+            ),
+        ),
+    ]
+
+    parser = DelphiTd32Parser.from_bytes(_td32_stream(subsections))
+
+    assert parser.lines[PureWindowsPath("C:\\src\\Marker.inc")] == [
+        (7, 1, 0x10),
+        (3, 1, 0x30),
+        (4, 1, 0x34),
+    ]
+    assert sorted(parser.lines[PureWindowsPath("C:\\src\\Unit1.pas")]) == [
+        (21, 1, 0x10),
+        (21, 1, 0x16),
+        (22, 1, 0x1A),
+        (23, 1, 0x2C),
+    ]

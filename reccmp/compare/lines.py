@@ -4,7 +4,7 @@ between FUNCTION markers and PDB analysis."""
 import logging
 from functools import cache
 from pathlib import Path, PurePath, PureWindowsPath
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 from reccmp.dir import convert_foreign_path
 
 logger = logging.getLogger(__name__)
@@ -144,3 +144,26 @@ class LinesDb:
 
     def find_line_of_recomp_address(self, address: int) -> tuple[PurePath, int] | None:
         return self._address_to_path_and_line.get(address, None)
+
+    def max_line(self, local_path: PurePath) -> int:
+        """The highest line number recorded for the local path, or 0."""
+        return max(
+            (
+                line_no
+                for line_no, _ in self._path_to_lines_and_addresses.get(local_path, [])
+            ),
+            default=0,
+        )
+
+    def remap_lines(self, local_path: PurePath, remap: Callable[[int], int]):
+        """Replace each line number recorded for the local path with remap(line)."""
+        lines = self._path_to_lines_and_addresses.get(local_path)
+        if lines is None:
+            return
+
+        self._path_to_lines_and_addresses[local_path] = [
+            (remap(line_no), addr) for line_no, addr in lines
+        ]
+        for address, (path, line_no) in self._address_to_path_and_line.items():
+            if path == local_path:
+                self._address_to_path_and_line[address] = (path, remap(line_no))

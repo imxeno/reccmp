@@ -3,6 +3,7 @@ These functions load the entity and type databases with information from code an
 """
 
 import logging
+from pathlib import PurePath
 from typing import Iterable
 from collections.abc import Sequence
 from reccmp.formats.exceptions import (
@@ -11,6 +12,7 @@ from reccmp.formats.exceptions import (
 from reccmp.formats import PEImage, TextFile
 from reccmp.cvdump import CvdumpTypesParser, CvdumpAnalysis
 from reccmp.delphi import DelphiMapAnalysis, DelphiTd32Analysis
+from reccmp.delphi.lines import LAST_LOGICAL_LINE, physical_line_map
 from reccmp.parser import DecompCodebase
 from reccmp.parser.marker import ProjectAliases
 from reccmp.types import EntityType, ImageId
@@ -181,6 +183,38 @@ def load_cvdump_lines(
     lines_db.mark_function_starts(tuple(seen_addrs))
 
 
+def remap_delphi_physical_lines(
+    code_files: Sequence[TextFile], lines_db: LinesDb, defines: dict[str, bool]
+):
+    """Map the physical line numbers Delphi 7 records past line 32767 of a
+    source file that uses `{$I}` includes back to the file's own lines."""
+
+    by_name: dict[str, list[TextFile]] = {}
+    for code_file in code_files:
+        by_name.setdefault(code_file.path.name.lower(), []).append(code_file)
+
+    def lookup(name: str, including: PurePath) -> tuple[PurePath, str] | None:
+        names = [name] if PurePath(name).suffix else [name + ".pas", name]
+        for candidate in names:
+            matches = by_name.get(PurePath(candidate.replace("\\", "/")).name.lower())
+            if not matches:
+                continue
+            # Delphi looks beside the including file first.
+            local = [f for f in matches if f.path.parent == including.parent]
+            found = (local or matches)[0]
+            return found.path, found.text
+        return None
+
+    for code_file in code_files:
+        if code_file.path.suffix.lower() not in (".pas", ".dpr", ".dpk"):
+            continue
+        if lines_db.max_line(code_file.path) <= LAST_LOGICAL_LINE:
+            continue
+        line_map = physical_line_map(code_file.path, code_file.text, lookup, defines)
+        if line_map is not None and line_map.sites:
+            lines_db.remap_lines(code_file.path, line_map.logical_line)
+
+
 # pylint: disable=too-many-positional-arguments, too-many-arguments
 def load_markers(
     code_files: Sequence[TextFile],
@@ -194,6 +228,7 @@ def load_markers(
     defines: dict[str, bool] | None = None,
 ):
     lines_db.add_local_paths((f.path for f in code_files))
+    remap_delphi_physical_lines(code_files, lines_db, defines or {})
     codebase = DecompCodebase(
         code_files, target_id, aliases=project_aliases, defines=defines
     )
